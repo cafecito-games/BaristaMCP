@@ -31,6 +31,18 @@ constexpr const char *FIELD_PRIME_MS = "prime_ms";
 
 const char HEX_DIGITS[] = "0123456789abcdef";
 
+// Longest client-supplied id a diagnostic will echo. A well-formed id is far shorter, and echoing an
+// arbitrary one verbatim would let an accepted request turn its own refusal into a response too large
+// for the transport to send, which would answer with a transport error instead of the wait status.
+constexpr int MAX_ECHOED_WAIT_ID_LENGTH = 64;
+
+String echoed_wait_id(const String &p_wait_id) {
+	if (p_wait_id.length() <= MAX_ECHOED_WAIT_ID_LENGTH) {
+		return p_wait_id;
+	}
+	return p_wait_id.substr(0, MAX_ECHOED_WAIT_ID_LENGTH) + "...";
+}
+
 bool snapshot_truncated(const EditorSnapshotData &p_data) {
 	return p_data.depth_truncated || p_data.element_limit_reached || p_data.traversal_limit_reached;
 }
@@ -390,7 +402,19 @@ void EditorWaitManager::_finish(EditorWait &r_wait, Status p_status, uint64_t p_
 void EditorWaitManager::_advance_time(uint64_t p_now_ms) {
 	for (auto &entry : waits) {
 		EditorWait &wait = entry.second;
-		if (wait.status == Status::PENDING && p_now_ms >= wait.deadline_ms) {
+		if (wait.status != Status::PENDING) {
+			continue;
+		}
+		// The prime window owns its own expiry, and it is checked before the deadline. A primed
+		// settle whose prime window has passed never observed the editor become busy, so the honest
+		// outcome is "never started" no matter how the two windows are sized against each other;
+		// reporting a timeout there would hide exactly the case priming exists to detect.
+		if (wait.priming && p_now_ms >= wait.prime_deadline_ms) {
+			wait.detail["observed_busy"] = false;
+			_finish(wait, Status::NOT_STARTED, p_now_ms);
+			continue;
+		}
+		if (p_now_ms >= wait.deadline_ms) {
 			_finish(wait, Status::WAIT_TIMEOUT, p_now_ms);
 		}
 	}
@@ -406,8 +430,7 @@ void EditorWaitManager::_advance_time(uint64_t p_now_ms) {
 	}
 }
 
-bool EditorWaitManager::_evaluate(EditorWait &r_wait, const EditorWaitContext &p_context, bool &r_not_started) {
-	r_not_started = false;
+bool EditorWaitManager::_evaluate(EditorWait &r_wait, const EditorWaitContext &p_context) {
 	const EditorWaitCondition &condition = r_wait.condition;
 
 	if (condition.type == CONDITION_FRAMES_ELAPSED) {
@@ -422,15 +445,11 @@ bool EditorWaitManager::_evaluate(EditorWait &r_wait, const EditorWaitContext &p
 		r_wait.detail["busy"] = p_context.filesystem_busy;
 		if (r_wait.priming) {
 			// Prime, then drain. A scan's own busy flag is raised asynchronously, so a loop that only
-			// drains exits at once and reports a settle that never happened.
+			// drains exits at once and reports a settle that never happened. The prime window's own
+			// expiry is decided in _advance_time, so this only ever observes the transition.
 			if (p_context.filesystem_busy) {
 				r_wait.priming = false;
 				r_wait.detail["observed_busy"] = true;
-				return false;
-			}
-			if (p_context.now_ms >= r_wait.prime_deadline_ms) {
-				r_wait.detail["observed_busy"] = false;
-				r_not_started = true;
 			}
 			return false;
 		}
@@ -537,8 +556,7 @@ Dictionary EditorWaitManager::start(
 				p_context.now_ms);
 	}
 
-	bool not_started = false;
-	if (_evaluate(candidate, p_context, not_started)) {
+	if (_evaluate(candidate, p_context)) {
 		// An already satisfied condition needs no handle at all, so nothing is created and nothing is
 		// left for a client to poll or cancel.
 		if (event_log != nullptr) {
@@ -576,7 +594,8 @@ Dictionary EditorWaitManager::poll(const String &p_wait_id, uint64_t p_now_ms) {
 	_advance_time(p_now_ms);
 	// The grammar is checked before the table is, so a malformed id is never turned into a lookup.
 	if (!is_wait_id(p_wait_id) || waits.find(p_wait_id) == waits.end()) {
-		return failure(Status::WAIT_NOT_FOUND, "No wait handle named '" + p_wait_id + "' is live in this session.");
+		return failure(Status::WAIT_NOT_FOUND,
+				"No wait handle named '" + echoed_wait_id(p_wait_id) + "' is live in this session.");
 	}
 	const auto entry = waits.find(p_wait_id);
 	if (entry->second.status == Status::PENDING) {
@@ -591,7 +610,8 @@ Dictionary EditorWaitManager::poll(const String &p_wait_id, uint64_t p_now_ms) {
 Dictionary EditorWaitManager::cancel(const String &p_wait_id, uint64_t p_now_ms) {
 	_advance_time(p_now_ms);
 	if (!is_wait_id(p_wait_id) || waits.find(p_wait_id) == waits.end()) {
-		return failure(Status::WAIT_NOT_FOUND, "No wait handle named '" + p_wait_id + "' is live in this session.");
+		return failure(Status::WAIT_NOT_FOUND,
+				"No wait handle named '" + echoed_wait_id(p_wait_id) + "' is live in this session.");
 	}
 	const auto entry = waits.find(p_wait_id);
 	EditorWait &wait = entry->second;
@@ -633,11 +653,8 @@ void EditorWaitManager::process(const EditorWaitContext &p_context) {
 		if (_condition_needs_snapshot(wait.condition.type) && !p_context.has_snapshot) {
 			continue;
 		}
-		bool not_started = false;
-		if (_evaluate(wait, p_context, not_started)) {
+		if (_evaluate(wait, p_context)) {
 			_finish(wait, Status::COMPLETE, p_context.now_ms);
-		} else if (not_started) {
-			_finish(wait, Status::NOT_STARTED, p_context.now_ms);
 		}
 	}
 }

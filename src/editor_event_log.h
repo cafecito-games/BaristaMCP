@@ -31,9 +31,11 @@ struct EditorEventLimits {
 	static constexpr int MAX_STRING_LENGTH = 200;
 	// Most detail entries one event may carry.
 	static constexpr int MAX_DETAIL_ENTRIES = 8;
-	// The largest marker a client may name. Indices are issued from 1 and one session cannot reach
-	// this bound, but the advertised range is explicit so an unrepresentable JSON number is rejected
-	// at the boundary rather than converted.
+	// The markers a client may name. Indices are issued from 1, so 0 is a marker no session can ever
+	// have issued and it is refused at the boundary rather than read as "the earliest one". One
+	// session cannot reach the upper bound, but the advertised range is explicit all the same, so an
+	// unrepresentable JSON number is rejected rather than converted.
+	static constexpr int64_t MIN_MARKER = 1;
 	static constexpr int64_t MAX_MARKER = 9007199254740992LL;
 };
 

@@ -165,7 +165,7 @@ class BaristaMCPWaitContractTests(WaitClientMixin, unittest.TestCase):
         schema = tool["inputSchema"]
         self.assertIs(schema["additionalProperties"], False)
         self.assertEqual(schema["required"], [])
-        self.assertEqual(schema["properties"]["marker"]["minimum"], 0)
+        self.assertEqual(schema["properties"]["marker"]["minimum"], 1)
         self.assertGreater(schema["properties"]["marker"]["maximum"], 0)
         self.assertEqual(
             (schema["properties"]["limit"]["minimum"], schema["properties"]["limit"]["maximum"]),
@@ -192,7 +192,14 @@ class BaristaMCPWaitContractTests(WaitClientMixin, unittest.TestCase):
                 self.assertIs(result["isError"], True, result)
                 self.assertEqual(result["structuredContent"]["error"], "invalid_arguments")
 
-        for arguments in ({"marker": 1e300}, {"limit": 0}, {"limit": MAX_EVENT_LIMIT + 1}, {"marker": -1}):
+        # Event indices are issued from 1, so 0 names no event this session could ever have issued.
+        for arguments in (
+            {"marker": 1e300},
+            {"limit": 0},
+            {"limit": MAX_EVENT_LIMIT + 1},
+            {"marker": -1},
+            {"marker": 0},
+        ):
             with self.subTest(arguments=arguments):
                 result = self.client.rpc("tools/call", {"name": EVENTS_TOOL, "arguments": arguments})["result"]
                 self.assertIs(result["isError"], True, result)
@@ -377,6 +384,21 @@ class BaristaMCPWaitContractTests(WaitClientMixin, unittest.TestCase):
         self.assertEqual(finished["status"], "not_started", finished)
         self.assertIs(finished["ok"], False)
         self.assertIs(finished["detail"]["observed_busy"], False)
+
+    def test_a_prime_window_that_fills_the_deadline_still_reports_not_started(self) -> None:
+        """The prime window owns its own expiry, so a timeout can never hide a never-started scan."""
+        primed = self.wait(
+            condition={"type": "filesystem_settles", "require_start": True, "prime_ms": 300},
+            timeout_ms=300,
+        )
+        self.assertEqual(primed["status"], "pending", primed)
+        self.assertEqual(self.poll_until_terminal(primed["wait_id"])["status"], "not_started")
+
+    def test_an_oversized_wait_id_is_still_refused_in_the_wait_contract(self) -> None:
+        """A refusal that echoed its input unbounded would answer with a transport error instead."""
+        refused = self.wait(wait_id="wait:" + "0" * 700_000)
+        self.assertEqual(refused["status"], "wait_not_found", refused["status"])
+        self.assertLess(len(refused["message"]), 400)
 
     def test_wait_ids_are_opaque_and_unique(self) -> None:
         issued = []

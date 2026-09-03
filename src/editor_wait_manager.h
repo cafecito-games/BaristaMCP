@@ -183,8 +183,8 @@ private:
 	void _advance_time(uint64_t p_now_ms);
 	void _finish(EditorWait &r_wait, Status p_status, uint64_t p_now_ms);
 	// Evaluates one condition against one reading. Returns true when the condition was observed to
-	// hold; r_settled_status carries a terminal status other than COMPLETE where one applies.
-	bool _evaluate(EditorWait &r_wait, const EditorWaitContext &p_context, bool &r_not_started);
+	// hold. Deadlines, including a primed settle's prime window, are decided in _advance_time.
+	bool _evaluate(EditorWait &r_wait, const EditorWaitContext &p_context);
 	Dictionary _payload(const EditorWait *p_wait, Status p_status, const String &p_message, const String &p_condition,
 			uint64_t p_now_ms) const;
 	static bool _condition_needs_snapshot(const String &p_type);

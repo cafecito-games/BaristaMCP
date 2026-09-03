@@ -493,7 +493,7 @@ Dictionary barista_event_schema() {
 Dictionary events_input_schema() {
 	Dictionary schema = MCPSchema::object("One bounded page of the Barista-owned event ring.");
 	MCPSchema::add_property(schema, "marker",
-			MCPSchema::ranged_integer(0, EditorEventLimits::MAX_MARKER,
+			MCPSchema::ranged_integer(EditorEventLimits::MIN_MARKER, EditorEventLimits::MAX_MARKER,
 					"Resume from this marker, which is the index of the first event to return. Absent starts "
 					"at the earliest event still stored. Only a marker this server issued names a page."),
 			false);

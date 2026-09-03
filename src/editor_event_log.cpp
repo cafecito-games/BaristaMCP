@@ -135,7 +135,9 @@ Dictionary EditorEventLog::poll(bool p_has_marker, int64_t p_marker, int p_limit
 	// A marker the server never issued is not a marker. Only [earliest, latest] can name a page, and
 	// anything below earliest names events the ring has already evicted.
 	const int64_t start = p_has_marker ? p_marker : earliest;
-	if (start > latest) {
+	// Indices are issued from MIN_MARKER, so anything below it names no event this session ever had.
+	// The advertised range already refuses it; it is re-checked here so the log is closed on its own.
+	if (start > latest || start < EditorEventLimits::MIN_MARKER) {
 		payload["ok"] = false;
 		payload["status"] = status_name(Status::INVALID_MARKER);
 		payload["message"] = "Marker " + String::num_int64(start) + " was never issued by this server session.";
