@@ -201,6 +201,9 @@ Dictionary control_state(Control *p_control, const String &p_role) {
 		state["editable"] = line_edit->is_editable();
 		state["secret"] = line_edit->is_secret();
 		state["text_length"] = line_edit->get_text().length();
+		// The field's own length cap is part of the contract a set_text or type_text request is
+		// checked against, so it is published rather than left for the client to discover by refusal.
+		state["max_length"] = line_edit->get_max_length();
 	}
 	TextEdit *text_edit = Object::cast_to<TextEdit>(p_control);
 	if (text_edit != nullptr) {

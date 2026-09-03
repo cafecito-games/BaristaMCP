@@ -255,11 +255,13 @@ Dictionary act_input_schema() {
 					String::num_int64(EditorActionLimits::MAX_TEXT_LENGTH) + " characters and type_text at most " +
 					String::num_int64(EditorActionLimits::MAX_TYPED_LENGTH) +
 					", because typing pushes one public "
-					"input event per character."),
+					"input event per character. Text longer than the target field's own published "
+					"'max_length' is rejected rather than truncated."),
 			false);
 	MCPSchema::add_property(schema, "value",
-			MCPSchema::number("Numeric value for set_value. A value outside the element's published range is "
-							  "rejected rather than clamped."),
+			MCPSchema::number("Numeric value for set_value. A value the element cannot hold exactly, whether "
+							  "outside its published range or off its published step, is rejected rather than "
+							  "clamped or snapped."),
 			false);
 	MCPSchema::add_property(schema, "checked", MCPSchema::boolean("Checked state for set_checked."), false);
 	MCPSchema::add_property(schema, "index",
@@ -270,7 +272,8 @@ Dictionary act_input_schema() {
 			MCPSchema::enum_string(EditorActionDriver::scroll_axis_vocabulary(), "Axis for scroll."), false);
 	MCPSchema::add_property(schema, "scroll_offset",
 			MCPSchema::ranged_integer(EditorActionLimits::MIN_SCROLL_OFFSET, EditorActionLimits::MAX_SCROLL_OFFSET,
-					"Scroll offset in pixels for scroll."),
+					"Scroll offset in pixels for scroll. An offset the element cannot reach is rejected and "
+					"leaves the element where it was, rather than reported as a scroll to a clamped offset."),
 			false);
 	MCPSchema::add_property(schema, "max_depth",
 			MCPSchema::integer("Maximum traversal depth of the capture the target is resolved against; clamped "

@@ -19,6 +19,8 @@ const COUNTERS_NAME := "Action Counters"
 ## many parents that each hold a wide child list.
 const WIDE_INTERNAL_CHILDREN_SETTING := "barista_mcp_test_fixture/wide_internal_children"
 const WIDE_INTERNAL_GROUP_SIZE := 250
+## Length cap published by the "Ticket" field, so a test can request text the field can never hold.
+const TICKET_MAX_LENGTH := 8
 
 var _panel: PanelContainer = null
 var _counters: Label = null
@@ -117,6 +119,24 @@ func _enter_tree() -> void:
 	passcode.secret = true
 	passcode.text = "roasted-secret"
 	column.add_child(passcode)
+
+	## A field that publishes its own length cap. Text longer than the cap can never be held, so an
+	## action that wrote it would report a value the client never asked for.
+	var ticket := LineEdit.new()
+	ticket.name = "Ticket"
+	ticket.max_length = TICKET_MAX_LENGTH
+	column.add_child(ticket)
+
+	## A focusable field under an ancestor that disables focus for its whole subtree. The field still
+	## advertises "focus" from its own focus mode, but no call can make it own focus, so a focus
+	## action on it must fail rather than report success against an element that never took focus.
+	var sealed_group := VBoxContainer.new()
+	sealed_group.name = "Sealed Group"
+	sealed_group.focus_behavior_recursive = Control.FOCUS_BEHAVIOR_DISABLED
+	var sealed_field := LineEdit.new()
+	sealed_field.name = "Sealed Field"
+	sealed_group.add_child(sealed_field)
+	column.add_child(sealed_group)
 
 	var notes := TextEdit.new()
 	notes.name = "Notes"

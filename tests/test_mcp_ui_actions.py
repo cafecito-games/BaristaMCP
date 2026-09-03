@@ -315,6 +315,74 @@ class BaristaMCPActionTests(unittest.TestCase):
         self.assertTrue(repeated["ok"], repeated)
         self.assertIs(repeated["changed"], False)
 
+    def test_an_unrepresentable_request_is_refused_rather_than_coerced(self) -> None:
+        """A route reports ok only when the exact postcondition the client asked for holds.
+
+        Every case below is a request the engine would otherwise answer by doing something else:
+        Range snaps a value to its step, LineEdit truncates to its max_length, a control under an
+        ancestor with focus disabled never takes focus, and a ScrollContainer clamps an offset to
+        its content. None of them may be reported as a successful action.
+        """
+        before = self.counters()
+
+        shots = find_one(self.client, within_fixture(name="Shots"))
+        self.assertEqual(shots["state"]["step"], 1.0)
+        snapped = self.act(selector=within_fixture(name="Shots"), action="set_value", value=2.5)
+        self.assertIs(snapped["ok"], False, snapped)
+        self.assertEqual(snapped["status"], "invalid_arguments")
+        self.assertEqual(snapped["route"], "none")
+        self.assertIs(snapped["changed"], False)
+        self.assertNotIn("element", snapped)
+        self.assertEqual(
+            find_one(self.client, within_fixture(name="Shots"))["state"]["value"], shots["state"]["value"]
+        )
+        self.assertEqual(self.counters()["value_changes"], before["value_changes"])
+
+        ticket = find_one(self.client, within_fixture(name="Ticket"))
+        max_length = ticket["state"]["max_length"]
+        self.assertEqual(max_length, 8)
+        over_long = "x" * (max_length + 1)
+        for action in ("set_text", "type_text"):
+            with self.subTest(action=action):
+                result = self.act(selector=within_fixture(name="Ticket"), action=action, text=over_long)
+                self.assertIs(result["ok"], False, result)
+                self.assertEqual(result["status"], "invalid_arguments", result)
+                self.assertEqual(result["route"], "none")
+                self.assertIs(result["changed"], False)
+                self.assertEqual(
+                    find_one(self.client, within_fixture(name="Ticket"))["text"], ticket["text"]
+                )
+        # Refusing the unrepresentable request loses nothing the field can actually hold.
+        exact = self.act(selector=within_fixture(name="Ticket"), action="set_text", text="x" * max_length)
+        self.assertTrue(exact["ok"], exact)
+        self.assertEqual(exact["element"]["text"], "x" * max_length)
+
+        sealed = find_one(self.client, within_fixture(name="Sealed Field"))
+        self.assertIn("focus", sealed["actions"])
+        refused = self.act(selector=within_fixture(name="Sealed Field"), action="focus")
+        self.assertIs(refused["ok"], False, refused)
+        self.assertEqual(refused["status"], "element_not_interactable", refused)
+        self.assertEqual(refused["route"], "none")
+        self.assertIs(refused["changed"], False)
+        self.assertNotIn("element", refused)
+        self.assertIs(find_one(self.client, within_fixture(name="Sealed Field"))["focused"], False)
+
+        menu = find_one(self.client, within_fixture(name="Menu Scroll"))
+        clamped = self.act(
+            selector=within_fixture(name="Menu Scroll"),
+            action="scroll",
+            scroll_axis="vertical",
+            scroll_offset=1000000,
+        )
+        self.assertIs(clamped["ok"], False, clamped)
+        self.assertEqual(clamped["status"], "invalid_arguments", clamped)
+        self.assertEqual(clamped["route"], "none")
+        self.assertEqual(
+            find_one(self.client, within_fixture(name="Menu Scroll"))["state"]["scroll_vertical"],
+            menu["state"]["scroll_vertical"],
+        )
+        self.assertEqual(self.counters(), before)
+
     def test_click_uses_the_public_input_route(self) -> None:
         before = self.counters()
         result = self.act(selector=within_fixture(role="button", name="Brew"), action="click")
@@ -581,22 +649,56 @@ class BaristaMCPActionPortabilityTests(unittest.TestCase):
                 self.assertIn(class_name, profile["enabled_classes"])
 
         required_methods = {
-            "BaseButton": ("is_toggle_mode", "set_pressed"),
-            "Control": ("get_focus_mode", "get_global_rect", "grab_focus", "has_focus"),
+            "BaseButton": ("is_pressed", "is_toggle_mode", "set_pressed"),
+            "Control": (
+                "get_focus_mode",
+                "get_focus_mode_with_override",
+                "get_global_rect",
+                "grab_focus",
+                "has_focus",
+            ),
             "CanvasItem": ("is_visible_in_tree",),
             "InputEventKey": ("set_keycode", "set_pressed", "set_unicode"),
             "InputEventMouse": ("set_button_mask", "set_global_position", "set_position"),
             "InputEventMouseButton": ("set_button_index", "set_pressed"),
-            "ItemList": ("get_item_count", "is_item_disabled", "is_item_selectable", "select"),
-            "LineEdit": ("is_editable", "set_text"),
+            "ItemList": (
+                "get_item_count",
+                "is_item_disabled",
+                "is_item_selectable",
+                "is_selected",
+                "select",
+            ),
+            "LineEdit": ("get_max_length", "get_text", "is_editable", "set_text"),
             "Node": ("get_viewport", "is_ancestor_of"),
             "OS": ("get_cmdline_user_args",),
             "ProjectSettings": ("get_setting",),
-            "Range": ("get_max", "get_min", "set_value"),
+            "Range": (
+                "get_max",
+                "get_min",
+                "get_page",
+                "get_step",
+                "get_value",
+                "is_greater_allowed",
+                "is_lesser_allowed",
+                "is_using_rounded_values",
+                "set_value",
+            ),
             "ScrollContainer": ("get_h_scroll", "get_v_scroll", "set_h_scroll", "set_v_scroll"),
-            "TabBar": ("get_tab_count", "is_tab_disabled", "is_tab_hidden", "set_current_tab"),
-            "TabContainer": ("get_tab_count", "is_tab_disabled", "is_tab_hidden", "set_current_tab"),
-            "TextEdit": ("is_editable", "set_text"),
+            "TabBar": (
+                "get_current_tab",
+                "get_tab_count",
+                "is_tab_disabled",
+                "is_tab_hidden",
+                "set_current_tab",
+            ),
+            "TabContainer": (
+                "get_current_tab",
+                "get_tab_count",
+                "is_tab_disabled",
+                "is_tab_hidden",
+                "set_current_tab",
+            ),
+            "TextEdit": ("get_text", "is_editable", "set_text"),
             "Viewport": ("gui_get_hovered_control", "push_input"),
         }
         for class_name, methods in required_methods.items():

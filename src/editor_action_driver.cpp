@@ -333,7 +333,22 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 	const String &action = p_request.action;
 
 	if (action == ACTION_FOCUS) {
+		// An ancestor that disables focus recursively overrides the element's own focus mode, and
+		// grab_focus() on such a control returns without focusing anything, so the request is refused
+		// before it is attempted.
+		if (p_control->get_focus_mode_with_override() == Control::FOCUS_NONE) {
+			r_status = Status::ELEMENT_NOT_INTERACTABLE;
+			r_message = "The element cannot take keyboard focus.";
+			return false;
+		}
 		p_control->grab_focus();
+		// The requested postcondition is that this exact element owns focus. Anything less is a
+		// failure, never a success reported against an element that never took focus.
+		if (!p_control->has_focus()) {
+			r_status = Status::ELEMENT_NOT_INTERACTABLE;
+			r_message = "The element refused keyboard focus.";
+			return false;
+		}
 		r_route = Route::CONTROL_METHOD;
 		return true;
 	}
@@ -370,7 +385,20 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 				r_message = "The text field is not editable.";
 				return false;
 			}
+			// LineEdit truncates silently to its own published max_length, so text the field can never
+			// hold is refused before anything is written rather than answered with a shorter value.
+			const int max_length = line_edit->get_max_length();
+			if (max_length > 0 && p_request.text.length() > max_length) {
+				r_status = Status::INVALID_ARGUMENTS;
+				r_message = "The text field holds at most " + String::num_int64(max_length) + " characters.";
+				return false;
+			}
 			line_edit->set_text(p_request.text);
+			if (line_edit->get_text() != p_request.text) {
+				r_status = Status::ELEMENT_NOT_INTERACTABLE;
+				r_message = "The text field did not take the requested text.";
+				return false;
+			}
 			r_route = Route::CONTROL_METHOD;
 			return true;
 		}
@@ -382,6 +410,11 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 				return false;
 			}
 			text_edit->set_text(p_request.text);
+			if (text_edit->get_text() != p_request.text) {
+				r_status = Status::ELEMENT_NOT_INTERACTABLE;
+				r_message = "The text area did not take the requested text.";
+				return false;
+			}
 			r_route = Route::CONTROL_METHOD;
 			return true;
 		}
@@ -393,10 +426,22 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 	if (action == ACTION_TYPE_TEXT || action == ACTION_SUBMIT) {
 		// Typing and submitting are keyboard routes, so they are delivered to the focus owner: the
 		// element takes focus first, exactly as it would for a person at the keyboard.
-		if (p_control->get_focus_mode() == Control::FOCUS_NONE) {
+		if (p_control->get_focus_mode_with_override() == Control::FOCUS_NONE) {
 			r_status = Status::ELEMENT_NOT_INTERACTABLE;
 			r_message = "The element cannot take keyboard focus.";
 			return false;
+		}
+		// Typing claims every requested character reaches the focused element. A field that publishes
+		// a max_length can never hold the requested text whatever the caret does with it, so the
+		// request is refused before a single key event is pushed.
+		if (action == ACTION_TYPE_TEXT) {
+			LineEdit *typed_field = Object::cast_to<LineEdit>(p_control);
+			const int max_length = typed_field != nullptr ? typed_field->get_max_length() : 0;
+			if (max_length > 0 && p_request.text.length() > max_length) {
+				r_status = Status::INVALID_ARGUMENTS;
+				r_message = "The text field holds at most " + String::num_int64(max_length) + " characters.";
+				return false;
+			}
 		}
 		Viewport *viewport = p_control->get_viewport();
 		if (viewport == nullptr) {
@@ -432,6 +477,11 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 			return false;
 		}
 		base_button->set_pressed(p_request.checked);
+		if (base_button->is_pressed() != p_request.checked) {
+			r_status = Status::ELEMENT_NOT_INTERACTABLE;
+			r_message = "The element did not take the requested checked state.";
+			return false;
+		}
 		r_route = Route::CONTROL_METHOD;
 		return true;
 	}
@@ -443,14 +493,32 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 			r_message = "Class '" + p_element.class_name + "' has no public value route.";
 			return false;
 		}
-		// Range clamps silently, so an out-of-range request is refused rather than answered with a
-		// value the client never asked for.
-		if (p_request.value < range->get_min() || p_request.value > range->get_max()) {
+		// Range publishes the grid its value must land on and snaps to it silently, so a value the
+		// element cannot hold exactly is refused rather than answered with a value the client never
+		// asked for. This mirrors Range::set_value: snap to step, round, then clamp to the published
+		// bounds, where the reachable maximum is max - page unless the element allows more.
+		double representable = p_request.value;
+		const double step = range->get_step();
+		if (step > 0.0) {
+			representable = Math::round((representable - range->get_min()) / step) * step + range->get_min();
+		}
+		if (range->is_using_rounded_values()) {
+			representable = Math::round(representable);
+		}
+		const bool below = !range->is_lesser_allowed() && representable < range->get_min();
+		const bool above = !range->is_greater_allowed() && representable > range->get_max() - range->get_page();
+		if (below || above || !Math::is_equal_approx(representable, p_request.value)) {
 			r_status = Status::INVALID_ARGUMENTS;
-			r_message = "Value is outside the published range of the element.";
+			r_message = "Value is not one the element can hold: it lies outside the published range or off "
+						"the published step.";
 			return false;
 		}
 		range->set_value(p_request.value);
+		if (!Math::is_equal_approx(range->get_value(), p_request.value)) {
+			r_status = Status::ELEMENT_NOT_INTERACTABLE;
+			r_message = "The element did not take the requested value.";
+			return false;
+		}
 		r_route = Route::CONTROL_METHOD;
 		return true;
 	}
@@ -473,6 +541,11 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 			return false;
 		}
 		item_list->select(p_request.index);
+		if (!item_list->is_selected(p_request.index)) {
+			r_status = Status::ELEMENT_NOT_INTERACTABLE;
+			r_message = "The element did not select the requested item.";
+			return false;
+		}
 		r_route = Route::CONTROL_METHOD;
 		return true;
 	}
@@ -505,6 +578,12 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 		} else {
 			tab_bar->set_current_tab(p_request.index);
 		}
+		const int current = tab_container != nullptr ? tab_container->get_current_tab() : tab_bar->get_current_tab();
+		if (current != p_request.index) {
+			r_status = Status::ELEMENT_NOT_INTERACTABLE;
+			r_message = "The element did not move to the requested tab.";
+			return false;
+		}
 		r_route = Route::CONTROL_METHOD;
 		return true;
 	}
@@ -516,10 +595,26 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 			r_message = "Class '" + p_element.class_name + "' has no public scroll route.";
 			return false;
 		}
-		if (p_request.scroll_axis == AXIS_VERTICAL) {
+		// A container clamps a scroll offset to whatever its content actually allows, so the offset it
+		// reached is read back. An offset the element cannot hold is refused with the element left at
+		// the offset it had, never reported as a scroll to somewhere the client never asked for.
+		const bool vertical = p_request.scroll_axis == AXIS_VERTICAL;
+		const int previous = vertical ? scroll_container->get_v_scroll() : scroll_container->get_h_scroll();
+		if (vertical) {
 			scroll_container->set_v_scroll(p_request.scroll_offset);
 		} else {
 			scroll_container->set_h_scroll(p_request.scroll_offset);
+		}
+		const int reached = vertical ? scroll_container->get_v_scroll() : scroll_container->get_h_scroll();
+		if (reached != p_request.scroll_offset) {
+			if (vertical) {
+				scroll_container->set_v_scroll(previous);
+			} else {
+				scroll_container->set_h_scroll(previous);
+			}
+			r_status = Status::INVALID_ARGUMENTS;
+			r_message = "Scroll offset is outside the range the element can reach.";
+			return false;
 		}
 		r_route = Route::CONTROL_METHOD;
 		return true;
