@@ -5,6 +5,7 @@ import http.client
 import os
 import queue
 import re
+import socket
 import subprocess
 import threading
 import time
@@ -96,24 +97,37 @@ class MCPClient:
         self.token = str(discovery["token"])
         self.next_id = 1
 
-    def request(self, payload: object) -> tuple[int, str]:
-        body = json.dumps(payload, separators=(",", ":"))
+    def raw_request(
+        self,
+        method: str,
+        path: str,
+        body: str,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, str]:
         connection = http.client.HTTPConnection(self.host, self.port, timeout=3)
         try:
             connection.request(
-                "POST",
-                self.path,
+                method,
+                path,
                 body=body,
-                headers={
-                    "Authorization": f"Bearer {self.token}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
+                headers=headers or {},
             )
             response = connection.getresponse()
             return response.status, response.read().decode("utf-8")
         finally:
             connection.close()
+
+    def request(self, payload: object) -> tuple[int, str]:
+        return self.raw_request(
+            "POST",
+            self.path,
+            json.dumps(payload, separators=(",", ":")),
+            {
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
 
     def rpc(self, method: str, params: dict[str, object]) -> dict[str, object]:
         request_id = self.next_id
@@ -127,6 +141,20 @@ class MCPClient:
         if response.get("id") != request_id:
             raise AssertionError(f"Mismatched JSON-RPC id: {response!r}")
         return response
+
+    def raw_socket_request(self, request: bytes) -> tuple[int, str]:
+        with socket.create_connection((self.host, self.port), timeout=3) as connection:
+            connection.sendall(request)
+            connection.shutdown(socket.SHUT_WR)
+            chunks: list[bytes] = []
+            while True:
+                chunk = connection.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        response = b"".join(chunks).decode("utf-8")
+        head, _, body = response.partition("\r\n\r\n")
+        return int(head.split(" ", 2)[1]), body
 
 
 class BaristaMCPAcceptanceTests(unittest.TestCase):
@@ -179,6 +207,59 @@ class BaristaMCPAcceptanceTests(unittest.TestCase):
                 self.assertEqual(client.rpc("ping", {})["result"], {})
             except (OSError, TimeoutError, json.JSONDecodeError) as error:
                 self.fail(f"MCP initialize request failed: {error}")
+        finally:
+            editor.stop()
+
+    def test_http_security_and_protocol_errors(self) -> None:
+        editor = EditorProcess()
+        try:
+            editor.start()
+            client = MCPClient(editor.wait_for_discovery())
+            ping = json.dumps({"jsonrpc": "2.0", "id": 10, "method": "ping", "params": {}})
+
+            status, _ = client.raw_request("POST", client.path, ping)
+            self.assertEqual(status, 401)
+            status, _ = client.raw_request(
+                "POST",
+                client.path,
+                ping,
+                {"Authorization": "Bearer incorrect"},
+            )
+            self.assertEqual(status, 401)
+
+            authorized = {"Authorization": f"Bearer {client.token}"}
+            status, _ = client.raw_request("GET", client.path, "", authorized)
+            self.assertEqual(status, 405)
+            status, _ = client.raw_request("POST", "/wrong", ping, authorized)
+            self.assertEqual(status, 404)
+            status, _ = client.raw_request(
+                "POST",
+                client.path,
+                ping,
+                {**authorized, "Origin": "https://attacker.example"},
+            )
+            self.assertEqual(status, 403)
+
+            status, body = client.raw_request("POST", client.path, "{", authorized)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["error"]["code"], -32700)
+            status, body = client.raw_request("POST", client.path, "[]", authorized)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["error"]["code"], -32600)
+
+            unknown = client.rpc("unknown/method", {})
+            self.assertEqual(unknown["error"]["code"], -32601)
+            invalid = client.rpc("initialize", {})
+            self.assertEqual(invalid["error"]["code"], -32602)
+
+            status, _ = client.raw_socket_request(
+                b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: nope\r\n\r\n"
+            )
+            self.assertEqual(status, 400)
+            status, _ = client.raw_socket_request(
+                b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 9000000\r\n\r\n"
+            )
+            self.assertEqual(status, 413)
         finally:
             editor.stop()
 

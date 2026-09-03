@@ -144,6 +144,41 @@ MCPServer::HTTPResponse MCPServer::_process_json(const String &p_body) {
 	return response;
 }
 
+bool MCPServer::_is_local_origin(const String &p_origin) {
+	if (p_origin.is_empty() || p_origin == "null") {
+		return false;
+	}
+	const int scheme_separator = p_origin.find("://");
+	if (scheme_separator < 0) {
+		return false;
+	}
+	const String scheme = p_origin.substr(0, scheme_separator).to_lower();
+	if (scheme != "http" && scheme != "https") {
+		return false;
+	}
+
+	String authority = p_origin.substr(scheme_separator + 3);
+	const int slash = authority.find("/");
+	if (slash >= 0) {
+		authority = authority.substr(0, slash);
+	}
+	String host = authority;
+	if (host.begins_with("[")) {
+		const int close = host.find("]");
+		if (close < 0) {
+			return false;
+		}
+		host = host.substr(1, close - 1);
+	} else {
+		const int colon = host.find(":");
+		if (colon >= 0) {
+			host = host.substr(0, colon);
+		}
+	}
+	host = host.to_lower();
+	return host == "localhost" || host == "127.0.0.1" || host == "::1";
+}
+
 MCPServer::HTTPResponse MCPServer::_process_request(const HTTPRequest &p_request) {
 	if (p_request.path != "/mcp") {
 		HTTPResponse response;
@@ -157,6 +192,13 @@ MCPServer::HTTPResponse MCPServer::_process_request(const HTTPRequest &p_request
 		response.status = 405;
 		response.reason = "Method Not Allowed";
 		response.body = "{\"error\":\"method_not_allowed\"}";
+		return response;
+	}
+	if (p_request.headers.has("origin") && !_is_local_origin(p_request.headers.get("origin", String()))) {
+		HTTPResponse response;
+		response.status = 403;
+		response.reason = "Forbidden";
+		response.body = "{\"error\":\"forbidden_origin\"}";
 		return response;
 	}
 	const String authorization = p_request.headers.get("authorization", String());

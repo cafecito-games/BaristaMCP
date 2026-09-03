@@ -45,6 +45,7 @@ class MCPServer {
 	void _send_error(int p_status, const String &p_reason, const String &p_code);
 	HTTPResponse _process_request(const HTTPRequest &p_request);
 	HTTPResponse _process_json(const String &p_body);
+	static bool _is_local_origin(const String &p_origin);
 	static Dictionary _json_rpc_error(int p_code, const String &p_message);
 
 public:
