@@ -24,8 +24,6 @@ namespace godot {
 // One parsed selector. Every constraint is explicit: an absent constraint never widens a match, and a
 // constraint on state an element does not publish never matches.
 struct EditorSelectorQuery {
-	bool has_id = false;
-	String id;
 	bool has_handle = false;
 	String handle;
 	bool has_role = false;
@@ -80,16 +78,12 @@ public:
 	// A cheap digest of the canonical form carried inside a cursor. It narrows a mismatch early; the
 	// canonical form is what actually decides identity.
 	static uint64_t digest(const EditorSelectorQuery &p_query);
-	// True when the query pins at least one element id and every id it names, including the ones
-	// nested in "within", belongs to p_generation. A query that pins no id, or that pins one from any
-	// other capture, answers false.
-	static bool pins_generation(const EditorSelectorQuery &p_query, uint64_t p_generation);
 	// Every handle named anywhere in the query, including inside "within".
 	static PackedStringArray handles(const EditorSelectorQuery &p_query);
 
 	// Collects matching elements in document order. r_total counts every match; r_page holds the
-	// matches inside [p_offset, p_offset + p_limit). Returns STALE_HANDLE when the selector pins an id
-	// from another capture, NO_MATCH when nothing matched, and OK otherwise.
+	// matches inside [p_offset, p_offset + p_limit). Returns NO_MATCH when nothing matched, and OK
+	// otherwise.
 	static Status match(const EditorSnapshotData &p_data, const EditorSelectorQuery &p_query, int p_offset, int p_limit,
 			std::vector<const EditorElement *> &r_page, int &r_total, bool &r_visit_limit_reached);
 

@@ -388,13 +388,10 @@ Dictionary EditorAutomationService::find_ui(const Dictionary &p_arguments, Strin
 		previous_classes.push_back(issued->second.class_name);
 	}
 
-	// A pinned element id names the capture that issued it. Capturing again advances the generation
-	// past the one the id names, so every server-issued id would be stale on arrival; the capture the
-	// query asks about is the cached one, so it is matched against instead of being replaced. An id
-	// from any other capture, or a malformed one, still fails closed in match().
-	const bool replay_cached =
-			!resume && has_cached_snapshot && EditorSelector::pins_generation(query, cached_snapshot.generation);
-	if (!resume && !replay_cached) {
+	// Every request that is not resuming a cursor answers about a capture it takes now. A cursor
+	// resumes against the cached capture instead, so a page boundary always refers to the generation
+	// its cursor names.
+	if (!resume) {
 		EditorSnapshotData data;
 		Dictionary payload;
 		if (!_capture(options, data, payload, r_error, r_message)) {
@@ -409,9 +406,9 @@ Dictionary EditorAutomationService::find_ui(const Dictionary &p_arguments, Strin
 	}
 
 	// A fresh capture above reissued these handles, so comparing against the class recorded before it
-	// is what detects an instance id that now belongs to a different object. On the replayed and
-	// resumed paths the cached capture is the one that issued them, so the comparison is against the
-	// class that capture recorded.
+	// is what detects an instance id that now belongs to a different object. On the resumed path the
+	// cached capture is the one that issued them, so the comparison is against the class that capture
+	// recorded.
 	for (int i = 0; i < query_handles.size(); i++) {
 		const EditorElement *resolved = find_by_handle(cached_snapshot.roots, query_handles[i]);
 		if (resolved != nullptr && resolved->class_name != previous_classes[(size_t)i]) {
@@ -425,10 +422,6 @@ Dictionary EditorAutomationService::find_ui(const Dictionary &p_arguments, Strin
 	bool visit_limit_reached = false;
 	const EditorSelector::Status status =
 			EditorSelector::match(cached_snapshot, query, offset, limit, page, total, visit_limit_reached);
-	if (status == EditorSelector::Status::STALE_HANDLE) {
-		return find_failure(EditorSelector::Status::STALE_HANDLE,
-				"Element id '" + query.id + "' was issued for another capture.", limit);
-	}
 	if (status == EditorSelector::Status::NO_MATCH) {
 		// A handle that is present in the capture resolved: some other constraint is what failed, and
 		// reporting that as a stale handle would be a wrong verdict.

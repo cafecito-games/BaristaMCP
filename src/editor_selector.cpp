@@ -15,7 +15,6 @@ namespace godot {
 
 namespace {
 
-constexpr const char *FIELD_ID = "id";
 constexpr const char *FIELD_HANDLE = "handle";
 constexpr const char *FIELD_ROLE = "role";
 constexpr const char *FIELD_NAME = "name";
@@ -30,7 +29,7 @@ constexpr const char *FIELD_SELECTED = "selected";
 constexpr const char *FIELD_WITHIN = "within";
 
 // Every field the selector vocabulary accepts, in the order it is advertised and digested.
-const char *const SELECTOR_FIELDS[] = {FIELD_ID, FIELD_HANDLE, FIELD_ROLE, FIELD_NAME, FIELD_TEXT, FIELD_TEXT_CONTAINS,
+const char *const SELECTOR_FIELDS[] = {FIELD_HANDLE, FIELD_ROLE, FIELD_NAME, FIELD_TEXT, FIELD_TEXT_CONTAINS,
 		FIELD_CLASS, FIELD_VISIBLE, FIELD_ENABLED, FIELD_FOCUSED, FIELD_PRESSED, FIELD_SELECTED, FIELD_WITHIN};
 
 constexpr const char *CURSOR_MAGIC = "bcur1";
@@ -107,8 +106,7 @@ bool parse_query(const Variant &p_selector, EditorSelectorQuery &r_query, int p_
 		}
 	}
 
-	if (!read_string_field(selector, FIELD_ID, r_query.has_id, r_query.id, r_message) ||
-			!read_string_field(selector, FIELD_HANDLE, r_query.has_handle, r_query.handle, r_message) ||
+	if (!read_string_field(selector, FIELD_HANDLE, r_query.has_handle, r_query.handle, r_message) ||
 			!read_string_field(selector, FIELD_ROLE, r_query.has_role, r_query.role, r_message) ||
 			!read_string_field(selector, FIELD_NAME, r_query.has_name, r_query.name, r_message) ||
 			!read_string_field(selector, FIELD_TEXT, r_query.has_text, r_query.text, r_message) ||
@@ -141,9 +139,6 @@ void append_field(String &r_canonical, const char *p_field, const String &p_valu
 
 void digest_into(const EditorSelectorQuery &p_query, String &r_canonical) {
 	r_canonical += "(";
-	if (p_query.has_id) {
-		append_field(r_canonical, FIELD_ID, p_query.id);
-	}
 	if (p_query.has_handle) {
 		append_field(r_canonical, FIELD_HANDLE, p_query.handle);
 	}
@@ -206,28 +201,7 @@ bool element_selection_state(const EditorElement &p_element, bool &r_selected) {
 	return false;
 }
 
-// A snapshot id is "s<generation>:<instance_id>" exactly as produced by EditorSnapshot::add_node
-// (src/editor_snapshot.cpp:394). Anything else names no capture at all.
-bool parse_id_generation(const String &p_id, uint64_t &r_generation) {
-	if (!p_id.begins_with("s")) {
-		return false;
-	}
-	const int separator = p_id.find(":");
-	if (separator < 2) {
-		return false;
-	}
-	const String generation_text = p_id.substr(1, separator - 1);
-	if (!generation_text.is_valid_int() || generation_text.begins_with("-")) {
-		return false;
-	}
-	r_generation = (uint64_t)generation_text.to_int();
-	return true;
-}
-
 bool matches_fields(const EditorElement &p_element, const EditorSelectorQuery &p_query) {
-	if (p_query.has_id && p_element.id != p_query.id) {
-		return false;
-	}
 	if (p_query.has_handle && p_element.handle != p_query.handle) {
 		return false;
 	}
@@ -379,24 +353,6 @@ PackedStringArray EditorSelector::handles(const EditorSelectorQuery &p_query) {
 	return found;
 }
 
-bool EditorSelector::pins_generation(const EditorSelectorQuery &p_query, uint64_t p_generation) {
-	bool pinned = false;
-	// Nesting is bounded by MAX_NESTING_DEPTH at parse time, so this walk is bounded too. A malformed
-	// id, or one from any other capture, answers false so the caller falls through to a fresh capture
-	// and the query still fails closed in match().
-	for (const EditorSelectorQuery *query = &p_query; query != nullptr; query = query->within.get()) {
-		if (!query->has_id) {
-			continue;
-		}
-		uint64_t id_generation = 0;
-		if (!parse_id_generation(query->id, id_generation) || id_generation != p_generation) {
-			return false;
-		}
-		pinned = true;
-	}
-	return pinned;
-}
-
 uint64_t EditorSelector::digest(const EditorSelectorQuery &p_query) {
 	const String canonical = EditorSelector::canonical(p_query);
 	return ((uint64_t)(uint32_t)canonical.hash()) | ((uint64_t)(uint32_t)canonical.length() << 32);
@@ -408,19 +364,6 @@ EditorSelector::Status EditorSelector::match(const EditorSnapshotData &p_data, c
 	r_page.clear();
 	r_total = 0;
 	r_visit_limit_reached = false;
-
-	// A pinned element id names the capture it came from. Resolving it against any other capture would
-	// silently answer about a different element, so it fails closed instead. Nesting is bounded by
-	// MAX_NESTING_DEPTH at parse time, so checking every id the query names is bounded too.
-	for (const EditorSelectorQuery *query = &p_query; query != nullptr; query = query->within.get()) {
-		if (!query->has_id) {
-			continue;
-		}
-		uint64_t id_generation = 0;
-		if (!parse_id_generation(query->id, id_generation) || id_generation != p_data.generation) {
-			return Status::STALE_HANDLE;
-		}
-	}
 
 	MatchWalker walker(p_query);
 	walker.offset = p_offset;

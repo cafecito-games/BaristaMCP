@@ -29,7 +29,6 @@ SELECTOR_STATUSES = (
     "invalid_cursor",
 )
 SELECTOR_FIELDS = (
-    "id",
     "handle",
     "role",
     "name",
@@ -208,66 +207,40 @@ class BaristaMCPSelectorTests(unittest.TestCase):
         self.assertIs(rejected["isError"], True)
         self.assertEqual(rejected["structuredContent"]["error"], "invalid_arguments")
 
-    def test_an_issued_id_replays_against_the_capture_that_issued_it(self) -> None:
-        # Snapshot ids are "s<generation>:<instance_id>" (src/editor_snapshot.cpp:394), so an id names
-        # the capture it came from. The id the server just issued must resolve against that capture.
+    def test_id_is_not_a_selector_field(self) -> None:
+        # Element ids are published for correlation only (src/mcp_contracts.cpp ui_element_schema);
+        # they are descoped as a selector input by cafecito-games/BaristaMCP#17, so "id" is an unknown
+        # field and fails closed like any other unknown field rather than widening the match.
+        tool = self._tool()
+        self.assertNotIn(
+            "id, ", tool["inputSchema"]["properties"]["selector"]["description"]
+        )
+
         issued = self.find(selector={"role": "button", "name": "Brew"})
         element_id = issued["matches"][0]["id"]
         self.assertTrue(element_id.startswith(f"s{issued['generation']}:"), element_id)
 
-        replay = self.find(selector={"id": element_id})
-        self.assertTrue(replay["ok"], replay)
-        self.assertEqual(replay["status"], "ok")
-        self.assertEqual(replay["match_count"], 1)
-        self.assertEqual(replay["generation"], issued["generation"])
-        self.assertEqual(replay["matches"][0]["id"], element_id)
-        self.assertEqual(replay["matches"][0]["handle"], issued["matches"][0]["handle"])
+        for selector in (
+            {"id": element_id},
+            {"id": "s1:1"},
+            {"id": ""},
+            {"id": 1},
+            {"role": "button", "id": element_id},
+            {"role": "button", "within": {"id": element_id}},
+        ):
+            with self.subTest(selector=selector):
+                rejected = self.find(selector=selector)
+                self.assertFalse(rejected["ok"], rejected)
+                self.assertEqual(rejected["status"], "invalid_selector", rejected)
+                self.assertEqual(rejected["matches"], [])
+                self.assertTrue(rejected["message"])
 
-        # An id nested in "within" names the same capture and resolves too.
-        nested = self.find(selector={"role": "button", "within": {"id": element_id}})
-        self.assertIn(nested["status"], ("ok", "no_match"), nested)
-        self.assertEqual(nested["generation"], issued["generation"])
-
-        # An id issued by inspect_editor_ui is the same vocabulary and replays the same way.
-        snapshot = self.client.structured_tool("inspect_editor_ui", {})
-        inspected_id = snapshot["tree"][0]["id"]
-        self.assertTrue(inspected_id.startswith(f"s{snapshot['generation']}:"), inspected_id)
-        inspected = self.find(selector={"id": inspected_id})
-        self.assertEqual(inspected["status"], "ok", inspected)
-        self.assertEqual(inspected["generation"], snapshot["generation"])
-        self.assertEqual(inspected["matches"][0]["id"], inspected_id)
-
-    def test_an_id_from_an_older_capture_is_still_stale(self) -> None:
-        # The replay path must not make every id resolvable: only the newest capture is replayable.
+    def test_unissued_handles_fail_closed(self) -> None:
         first = self.find(selector={"role": "button", "name": "Brew"})
-        older_id = first["matches"][0]["id"]
-
-        # A capture that pins no id retires the previous one.
-        newer = self.find(selector={"role": "button", "name": "Grind"})
-        self.assertNotEqual(newer["generation"], first["generation"])
-
-        stale = self.find(selector={"id": older_id})
-        self.assertEqual(stale["status"], "stale_handle", stale)
-        self.assertEqual(stale["matches"], [])
-        self.assertEqual(
-            self.find(selector={"role": "button", "within": {"id": older_id}})["status"],
-            "stale_handle",
-        )
-        # An id naming a capture that has not happened yet is stale, not a future match.
-        future_id = f"s{newer['generation'] + 1000}:{older_id.split(':', 1)[1]}"
-        self.assertEqual(self.find(selector={"id": future_id})["status"], "stale_handle")
-
-    def test_stale_ids_and_unissued_handles_fail_closed(self) -> None:
-        first = self.find(selector={"role": "button", "name": "Brew"})
-        element_id = first["matches"][0]["id"]
         handle = first["matches"][0]["handle"]
 
         # A new capture retires the previous snapshot ids without retiring durable handles.
         self.find(selector={"role": "button", "name": "Grind"})
-
-        stale = self.find(selector={"id": element_id})
-        self.assertEqual(stale["status"], "stale_handle")
-        self.assertEqual(stale["matches"], [])
 
         durable = self.find(selector={"handle": handle})
         self.assertEqual(durable["status"], "ok")
@@ -278,14 +251,6 @@ class BaristaMCPSelectorTests(unittest.TestCase):
                 result = self.find(selector={"handle": unissued})
                 self.assertEqual(result["status"], "stale_handle", result)
                 self.assertEqual(result["matches"], [])
-
-        for malformed_id in ("", "el:1", "sx:1", "s:1", "9:1"):
-            with self.subTest(element_id=malformed_id):
-                self.assertEqual(self.find(selector={"id": malformed_id})["status"], "stale_handle")
-
-        # A stale id nested in "within" is stale too, not an ordinary field mismatch.
-        nested = self.find(selector={"role": "button", "within": {"id": element_id}})
-        self.assertEqual(nested["status"], "stale_handle", nested)
 
     def test_handles_nested_in_within_are_validated(self) -> None:
         issued = self.find(selector={"role": "button", "name": "Brew"})["matches"][0]["handle"]

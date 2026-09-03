@@ -50,7 +50,10 @@ constexpr const char *UI_MATCH_DEFINITION = "ui_match";
 // with an always-empty "children" array, so a single page can never carry a whole subtree.
 Dictionary ui_element_schema(bool p_recursive = true) {
 	Dictionary schema = MCPSchema::object("One semantic editor control or window.");
-	MCPSchema::add_property(schema, "id", MCPSchema::string("Snapshot-scoped element id."), true);
+	MCPSchema::add_property(schema, "id",
+			MCPSchema::string("Snapshot-scoped element id, published for correlation inside one capture. "
+							  "It is not a selector field and is not replayable; use \"handle\" for identity."),
+			true);
 	MCPSchema::add_property(
 			schema, "handle", MCPSchema::string("Durable opaque handle for stable public identity."), true);
 	MCPSchema::add_property(schema, "role",
