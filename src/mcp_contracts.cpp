@@ -181,6 +181,56 @@ Dictionary ui_snapshot_input_schema() {
 	return schema;
 }
 
+Dictionary string_list_schema(const String &p_description) {
+	Dictionary schema = MCPSchema::object(p_description);
+	MCPSchema::add_property(schema, "count", MCPSchema::integer("Total number of entries before bounding."), true);
+	MCPSchema::add_property(schema, "items", MCPSchema::array(MCPSchema::string(), "Bounded published entries."), true);
+	MCPSchema::add_property(
+			schema, "truncated", MCPSchema::boolean("Whether entries were omitted to stay bounded."), true);
+	return schema;
+}
+
+Dictionary editor_state_output_schema() {
+	Dictionary scenes = MCPSchema::object("Open, unsaved, and edited scene paths.");
+	MCPSchema::add_property(scenes, "open", string_list_schema("Scene files open in the editor."), true);
+	MCPSchema::add_property(scenes, "unsaved", string_list_schema("Open scene files with unsaved changes."), true);
+	MCPSchema::add_property(
+			scenes, "current", MCPSchema::string("Scene file path of the edited scene root, or empty."), true);
+
+	Dictionary node = MCPSchema::object("One selected scene node.");
+	MCPSchema::add_property(node, "name", MCPSchema::string("Bounded node name."), true);
+	MCPSchema::add_property(node, "class", MCPSchema::string("Public Godot class name."), true);
+	MCPSchema::add_property(node, "path", MCPSchema::string("Bounded scene path, for diagnostics only."), true);
+	Dictionary selection = MCPSchema::object("Current editor scene selection.");
+	MCPSchema::add_property(selection, "count", MCPSchema::integer("Total number of selected nodes."), true);
+	MCPSchema::add_property(selection, "nodes", MCPSchema::array(node, "Bounded published selection."), true);
+	MCPSchema::add_property(selection, "truncated", MCPSchema::boolean("Whether selected nodes were omitted."), true);
+
+	Dictionary script = MCPSchema::object("Script editor state.");
+	MCPSchema::add_property(
+			script, "current", MCPSchema::string("Resource path of the current script, or empty."), true);
+	MCPSchema::add_property(script, "open", string_list_schema("Resource paths of open scripts."), true);
+	MCPSchema::add_property(script, "unsaved", string_list_schema("Open script files with unsaved changes."), true);
+
+	Dictionary filesystem = MCPSchema::object("Editor resource filesystem state.");
+	MCPSchema::add_property(filesystem, "scanning", MCPSchema::boolean("Whether the filesystem is scanning."), true);
+	MCPSchema::add_property(filesystem, "importing", MCPSchema::boolean("Whether the filesystem is importing."), true);
+	MCPSchema::add_property(filesystem, "scan_progress", MCPSchema::number("Scan progress between 0.0 and 1.0."), true);
+
+	Dictionary play = MCPSchema::object("Editor play state.");
+	MCPSchema::add_property(play, "is_playing", MCPSchema::boolean("Whether the editor is playing a scene."), true);
+	MCPSchema::add_property(play, "playing_scene", MCPSchema::string("Scene file path being played, or empty."), true);
+
+	Dictionary schema = MCPSchema::object("Stable public editor and scene state.");
+	MCPSchema::add_property(schema, "project", project_output_schema(), true);
+	MCPSchema::add_property(schema, "scenes", scenes, true);
+	MCPSchema::add_property(schema, "selection", selection, true);
+	MCPSchema::add_property(schema, "script", script, true);
+	MCPSchema::add_property(schema, "filesystem", filesystem, true);
+	MCPSchema::add_property(schema, "play", play, true);
+	return schema;
+}
+
 Dictionary make_tool(const String &p_name, const String &p_description, const Dictionary &p_output_schema,
 		const Dictionary &p_input_schema = MCPSchema::object()) {
 	Dictionary tool;
@@ -214,6 +264,9 @@ Array MCPContracts::build_tools_list() {
 	tools.push_back(make_tool("find_editor_ui",
 			"Find editor UI elements by semantic selector, with bounded pages and durable handles.",
 			find_output_schema(), find_input_schema()));
+	tools.push_back(make_tool("read_editor_state",
+			"Read stable public editor state: project, scenes, selection, script, filesystem, and play.",
+			editor_state_output_schema()));
 	tools.push_back(make_tool("inspect_editor_ui",
 			"Capture a bounded semantic snapshot of the stock Godot editor UI through public APIs.",
 			ui_snapshot_output_schema(), ui_snapshot_input_schema()));
@@ -236,11 +289,74 @@ Array MCPContracts::build_resources_list() {
 	Array resources;
 	resources.push_back(make_resource(PROJECT_INFO_RESOURCE_URI, "project_info", "Project info",
 			"Stock Godot version, project, edited scene, and play-state information."));
+	resources.push_back(make_resource(UI_TREE_RESOURCE_URI, "ui_tree", "Editor UI tree",
+			"Bounded semantic snapshot of the stock Godot editor UI, identical to inspect_editor_ui."));
+	resources.push_back(make_resource(EDITOR_STATE_RESOURCE_URI, "editor_state", "Editor state",
+			"Stable public editor state, identical to read_editor_state."));
+	resources.push_back(make_resource(ACTIVE_SCENE_RESOURCE_URI, "active_scene", "Active scene",
+			"Summary of the edited scene root, open scenes, and play state."));
+	resources.push_back(make_resource(SCENE_TREE_RESOURCE_URI, "scene_tree", "Scene tree",
+			"Bounded traversal of the edited scene, published with the limits that produced it."));
 	return resources;
 }
 
 Array MCPContracts::build_resource_templates_list() {
-	return Array();
+	Array templates;
+	Dictionary element = make_resource(UI_ELEMENT_TEMPLATE_URI, "ui_element", "Editor UI element",
+			"One editor UI element named by a durable handle Barista issued.");
+	element.erase("uri");
+	element["uriTemplate"] = UI_ELEMENT_TEMPLATE_URI;
+	templates.push_back(element);
+	Dictionary subtree = make_resource(UI_SUBTREE_TEMPLATE_URI, "ui_subtree", "Editor UI subtree",
+			"One editor UI element and its bounded subtree, named by a durable handle Barista issued.");
+	subtree.erase("uri");
+	subtree["uriTemplate"] = UI_SUBTREE_TEMPLATE_URI;
+	templates.push_back(subtree);
+	return templates;
+}
+
+bool MCPContracts::resolve_resource(const String &p_uri, Dictionary &r_resource, String &r_handle) {
+	r_handle = String();
+	if (find_resource(p_uri, r_resource)) {
+		return true;
+	}
+
+	const Array templates = build_resource_templates_list();
+	for (int i = 0; i < templates.size(); i++) {
+		const Dictionary entry = templates[i];
+		const String uri_template = entry.get("uriTemplate", Variant());
+		const String prefix = uri_template.trim_suffix("{handle}");
+		if (prefix == uri_template || !p_uri.begins_with(prefix)) {
+			continue;
+		}
+		const String segment = p_uri.substr(prefix.length());
+		if (segment.is_empty() || segment.length() > MAX_TEMPLATE_SEGMENT_LENGTH || segment.contains("/")) {
+			return false;
+		}
+		const String handle = segment.uri_decode();
+		// The decoded segment must be a handle and nothing else: no separators, no second escape, and
+		// no characters outside the published handle grammar.
+		const String prefix_text = EditorHandleLimits::HANDLE_PREFIX;
+		if (!handle.begins_with(prefix_text) || handle.contains("/") || handle.contains("%")) {
+			return false;
+		}
+		const String instance_text = handle.substr(prefix_text.length());
+		if (instance_text.is_empty() || instance_text.length() > 20) {
+			return false;
+		}
+		for (int character = 0; character < instance_text.length(); character++) {
+			if (instance_text[character] < '0' || instance_text[character] > '9') {
+				return false;
+			}
+		}
+		Dictionary resource = entry;
+		resource.erase("uriTemplate");
+		resource["uri"] = p_uri;
+		r_resource = resource;
+		r_handle = handle;
+		return true;
+	}
+	return false;
 }
 
 bool MCPContracts::find_resource(const String &p_uri, Dictionary &r_resource) {

@@ -9,6 +9,7 @@
 #include "editor_tool_provider.h"
 
 #include "editor_automation_service.h"
+#include "editor_state_reader.h"
 #include "mcp_contracts.h"
 #include "mcp_schema.h"
 
@@ -57,24 +58,11 @@ Dictionary EditorToolProvider::status(bool p_initialized) const {
 }
 
 Dictionary EditorToolProvider::project_info() const {
-	ProjectSettings *project_settings = ProjectSettings::get_singleton();
-	Dictionary info;
-	info["project_name"] = project_settings->get_setting("application/config/name", "");
-	info["project_path"] = project_settings->globalize_path("res://").trim_suffix("/");
-	info["godot_version"] = Engine::get_singleton()->get_version_info();
+	return EditorStateReader::project_info(editor_interface);
+}
 
-	String current_scene;
-	bool is_playing = false;
-	if (editor_interface != nullptr) {
-		Node *root = editor_interface->get_edited_scene_root();
-		if (root != nullptr) {
-			current_scene = root->get_scene_file_path();
-		}
-		is_playing = editor_interface->is_playing_scene();
-	}
-	info["current_scene"] = current_scene;
-	info["is_playing"] = is_playing;
-	return info;
+Dictionary EditorToolProvider::editor_state() const {
+	return EditorStateReader::editor_state(editor_interface);
 }
 
 Dictionary EditorToolProvider::_tool_error(const String &p_error, const String &p_message) {
@@ -84,12 +72,44 @@ Dictionary EditorToolProvider::_tool_error(const String &p_error, const String &
 	return _tool_result(error, true);
 }
 
-bool EditorToolProvider::read_resource(const String &p_uri, Dictionary &r_payload) const {
-	if (p_uri != MCPContracts::PROJECT_INFO_RESOURCE_URI) {
+bool EditorToolProvider::read_resource(
+		const String &p_uri, const String &p_handle, Dictionary &r_payload, String &r_error, String &r_message) const {
+	r_error = String();
+	r_message = String();
+	if (p_uri == MCPContracts::PROJECT_INFO_RESOURCE_URI) {
+		r_payload = project_info();
+		return true;
+	}
+	if (p_uri == MCPContracts::EDITOR_STATE_RESOURCE_URI) {
+		r_payload = editor_state();
+		return true;
+	}
+	if (p_uri == MCPContracts::ACTIVE_SCENE_RESOURCE_URI) {
+		r_payload = EditorStateReader::active_scene(editor_interface);
+		return true;
+	}
+	if (p_uri == MCPContracts::SCENE_TREE_RESOURCE_URI) {
+		r_payload = EditorStateReader::scene_tree(editor_interface);
+		return true;
+	}
+	if (automation_service == nullptr) {
 		return false;
 	}
-	r_payload = project_info();
-	return true;
+	if (p_uri == MCPContracts::UI_TREE_RESOURCE_URI) {
+		r_payload = automation_service->inspect_ui(Dictionary(), r_error, r_message);
+		return r_error.is_empty();
+	}
+	if (p_handle.is_empty()) {
+		return false;
+	}
+	const bool include_children =
+			p_uri.begins_with(String(MCPContracts::UI_SUBTREE_TEMPLATE_URI).trim_suffix("{handle}"));
+	const bool is_element = p_uri.begins_with(String(MCPContracts::UI_ELEMENT_TEMPLATE_URI).trim_suffix("{handle}"));
+	if (!include_children && !is_element) {
+		return false;
+	}
+	r_payload = automation_service->read_element(p_handle, include_children, r_error, r_message);
+	return r_error.is_empty();
 }
 
 Dictionary EditorToolProvider::call(const String &p_name, const Dictionary &p_arguments, bool p_initialized) const {
@@ -108,6 +128,8 @@ Dictionary EditorToolProvider::call(const String &p_name, const Dictionary &p_ar
 		structured = status(p_initialized);
 	} else if (p_name == "get_project_info") {
 		structured = project_info();
+	} else if (p_name == "read_editor_state") {
+		structured = editor_state();
 	} else if (p_name == "find_editor_ui") {
 		if (automation_service == nullptr) {
 			return _tool_error("unsupported_capability", "Editor automation is unavailable in this session.");

@@ -33,9 +33,13 @@ public:
 
 	Dictionary status(bool p_initialized) const;
 	Dictionary project_info() const;
-	// Fills r_payload with the structured content of an advertised resource. Returns false for any URI
-	// the provider does not serve, so unknown URIs can never be mapped onto another resource.
-	bool read_resource(const String &p_uri, Dictionary &r_payload) const;
+	Dictionary editor_state() const;
+	// Fills r_payload with the structured content of an advertised resource. p_handle is the validated
+	// handle segment of a templated URI and is empty otherwise. Returns false for any URI the provider
+	// does not serve and for any handle that no longer resolves, so an unknown URI can never be mapped
+	// onto another resource and a stale handle can never answer with another element.
+	bool read_resource(const String &p_uri, const String &p_handle, Dictionary &r_payload, String &r_error,
+			String &r_message) const;
 };
 
 } // namespace godot

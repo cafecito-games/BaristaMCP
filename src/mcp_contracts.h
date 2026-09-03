@@ -23,6 +23,14 @@ public:
 	static constexpr const char *SERVER_NAME = "BaristaMCP";
 	static constexpr const char *SERVER_VERSION = "0.1.0";
 	static constexpr const char *PROJECT_INFO_RESOURCE_URI = "barista://project/info";
+	static constexpr const char *UI_TREE_RESOURCE_URI = "barista://ui/tree";
+	static constexpr const char *EDITOR_STATE_RESOURCE_URI = "barista://editor/state";
+	static constexpr const char *ACTIVE_SCENE_RESOURCE_URI = "barista://scene/active";
+	static constexpr const char *SCENE_TREE_RESOURCE_URI = "barista://scene/tree";
+	static constexpr const char *UI_ELEMENT_TEMPLATE_URI = "barista://ui/element/{handle}";
+	static constexpr const char *UI_SUBTREE_TEMPLATE_URI = "barista://ui/subtree/{handle}";
+	// Longest accepted resource-template segment. A longer segment cannot name an issued handle.
+	static constexpr int MAX_TEMPLATE_SEGMENT_LENGTH = 64;
 	static constexpr const char *JSON_MIME_TYPE = "application/json";
 	// Serialized resource payloads larger than this are refused instead of overrunning the transport
 	// response cap enforced by MCPServer.
@@ -34,6 +42,10 @@ public:
 	static Array build_resources_list();
 	static Array build_resource_templates_list();
 	static bool find_resource(const String &p_uri, Dictionary &r_resource);
+	// Resolves one advertised resource URI, exact or templated. A templated URI yields its
+	// percent-decoded handle segment, validated against the handle grammar; a segment that is not a
+	// well-formed handle is not a resource, so a URI segment never becomes an unchecked lookup.
+	static bool resolve_resource(const String &p_uri, Dictionary &r_resource, String &r_handle);
 
 	static Dictionary list_params_schema();
 	static Dictionary resource_read_params_schema();
