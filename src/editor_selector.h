@@ -80,6 +80,10 @@ public:
 	// A cheap digest of the canonical form carried inside a cursor. It narrows a mismatch early; the
 	// canonical form is what actually decides identity.
 	static uint64_t digest(const EditorSelectorQuery &p_query);
+	// True when the query pins at least one element id and every id it names, including the ones
+	// nested in "within", belongs to p_generation. A query that pins no id, or that pins one from any
+	// other capture, answers false.
+	static bool pins_generation(const EditorSelectorQuery &p_query, uint64_t p_generation);
 	// Every handle named anywhere in the query, including inside "within".
 	static PackedStringArray handles(const EditorSelectorQuery &p_query);
 

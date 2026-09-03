@@ -30,6 +30,9 @@ class EditorAutomationService {
 	struct IssuedHandle {
 		String class_name;
 		uint64_t generation = 0;
+		// The options the capture that issued this handle actually applied. A later capture is not
+		// automatically a superset of an earlier one, so resolution is widened to cover them.
+		EditorSnapshotOptions options;
 	};
 
 	EditorInterface *editor_interface = nullptr;
@@ -47,7 +50,8 @@ class EditorAutomationService {
 	bool _capture(const EditorSnapshotOptions &p_requested, EditorSnapshotData &r_data, Dictionary &r_payload,
 			String &r_error, String &r_message);
 	void _register_handles(const EditorSnapshotData &p_data);
-	void _register_elements(const std::vector<EditorElement> &p_elements, uint64_t p_generation, int &r_budget);
+	void _register_elements(const std::vector<EditorElement> &p_elements, uint64_t p_generation,
+			const EditorSnapshotOptions &p_options, int &r_budget);
 	// Resolves a handle against the issued-handle registry and a freshly captured snapshot. Returns
 	// false with "stale_handle" for a handle Barista never issued, one that no longer resolves, and one
 	// whose object is no longer of the recorded type.

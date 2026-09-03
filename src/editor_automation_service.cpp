@@ -92,8 +92,8 @@ bool EditorAutomationService::_capture(const EditorSnapshotOptions &p_requested,
 	return true;
 }
 
-void EditorAutomationService::_register_elements(
-		const std::vector<EditorElement> &p_elements, uint64_t p_generation, int &r_budget) {
+void EditorAutomationService::_register_elements(const std::vector<EditorElement> &p_elements, uint64_t p_generation,
+		const EditorSnapshotOptions &p_options, int &r_budget) {
 	for (const EditorElement &element : p_elements) {
 		if (r_budget <= 0) {
 			return;
@@ -106,10 +106,11 @@ void EditorAutomationService::_register_elements(
 				IssuedHandle record;
 				record.class_name = element.class_name;
 				record.generation = p_generation;
+				record.options = p_options;
 				issued_handles[(uint64_t)instance_text.to_int()] = record;
 			}
 		}
-		_register_elements(element.children, p_generation, r_budget);
+		_register_elements(element.children, p_generation, p_options, r_budget);
 	}
 }
 
@@ -117,7 +118,7 @@ void EditorAutomationService::_register_handles(const EditorSnapshotData &p_data
 	// A capture never produces more than MAX_MAX_ELEMENTS elements, so registration is bounded before
 	// it starts walking.
 	int budget = EditorSnapshotLimits::MAX_MAX_ELEMENTS;
-	_register_elements(p_data.roots, p_data.generation, budget);
+	_register_elements(p_data.roots, p_data.generation, p_data.applied_options, budget);
 	if ((int)issued_handles.size() <= EditorHandleLimits::MAX_ISSUED_HANDLES) {
 		return;
 	}
@@ -144,6 +145,11 @@ const EditorElement *find_by_handle(const std::vector<EditorElement> &p_elements
 		}
 	}
 	return nullptr;
+}
+
+bool same_options(const EditorSnapshotOptions &p_left, const EditorSnapshotOptions &p_right) {
+	return p_left.max_depth == p_right.max_depth && p_left.max_elements == p_right.max_elements &&
+			p_left.include_internal == p_right.include_internal;
 }
 
 bool parse_handle(const String &p_handle, uint64_t &r_instance_id) {
@@ -183,26 +189,45 @@ bool EditorAutomationService::_resolve_handle(const String &p_handle, const Edit
 	// out before it runs.
 	const IssuedHandle previous = issued->second;
 
-	// Neither capture is a superset of the other: internal elements can crowd public ones out of the
-	// element budget, so a handle is looked for in the public capture first and then, only if it was
-	// not found, in the capture that also carries internal elements. Both are bounded.
+	// No capture is a superset of another. Internal elements can crowd public ones out of the element
+	// budget, and a deeper walk can exhaust that budget before reaching an element a shallower walk
+	// reached, so a wider option value is not by itself a wider result. The request's options are first
+	// widened to cover the capture that issued the handle, and the issuing options themselves are the
+	// last resort, because that capture demonstrably reached this element. Every attempt is bounded.
+	EditorSnapshotOptions widened = p_options;
+	if (previous.options.max_depth > widened.max_depth) {
+		widened.max_depth = previous.options.max_depth;
+	}
+	if (previous.options.max_elements > widened.max_elements) {
+		widened.max_elements = previous.options.max_elements;
+	}
+	widened.include_internal = p_options.include_internal || previous.options.include_internal;
+
+	std::vector<EditorSnapshotOptions> attempts;
+	EditorSnapshotOptions public_first = widened;
+	public_first.include_internal = false;
+	attempts.push_back(public_first);
+	if (widened.include_internal) {
+		attempts.push_back(widened);
+	}
+	if (!same_options(previous.options, public_first) && !same_options(previous.options, widened)) {
+		attempts.push_back(previous.options);
+	}
+
 	Dictionary payload;
 	String capture_error;
 	String capture_message;
 	const EditorElement *element = nullptr;
-	EditorSnapshotOptions options = p_options;
-	options.include_internal = false;
-	for (int attempt = 0; attempt < 2 && element == nullptr; attempt++) {
-		options.include_internal = attempt == 1;
-		if (!p_options.include_internal && options.include_internal) {
-			break;
-		}
+	for (const EditorSnapshotOptions &options : attempts) {
 		if (!_capture(options, r_data, payload, capture_error, capture_message)) {
 			r_error = capture_error;
 			r_message = capture_message;
 			return false;
 		}
 		element = find_by_handle(r_data.roots, p_handle);
+		if (element != nullptr) {
+			break;
+		}
 	}
 	if (element == nullptr) {
 		r_error = "stale_handle";
@@ -363,7 +388,13 @@ Dictionary EditorAutomationService::find_ui(const Dictionary &p_arguments, Strin
 		previous_classes.push_back(issued->second.class_name);
 	}
 
-	if (!resume) {
+	// A pinned element id names the capture that issued it. Capturing again advances the generation
+	// past the one the id names, so every server-issued id would be stale on arrival; the capture the
+	// query asks about is the cached one, so it is matched against instead of being replaced. An id
+	// from any other capture, or a malformed one, still fails closed in match().
+	const bool replay_cached =
+			!resume && has_cached_snapshot && EditorSelector::pins_generation(query, cached_snapshot.generation);
+	if (!resume && !replay_cached) {
 		EditorSnapshotData data;
 		Dictionary payload;
 		if (!_capture(options, data, payload, r_error, r_message)) {
@@ -371,11 +402,16 @@ Dictionary EditorAutomationService::find_ui(const Dictionary &p_arguments, Strin
 		}
 		cached_snapshot = data;
 		has_cached_snapshot = true;
+	}
+	if (!resume) {
+		// A cursor issued below is resumable only for this query, whether or not the capture is new.
 		cached_selector = EditorSelector::canonical(query);
 	}
 
-	// The capture above reissued these handles, so comparing against the class recorded before it is
-	// what detects an instance id that now belongs to a different object.
+	// A fresh capture above reissued these handles, so comparing against the class recorded before it
+	// is what detects an instance id that now belongs to a different object. On the replayed and
+	// resumed paths the cached capture is the one that issued them, so the comparison is against the
+	// class that capture recorded.
 	for (int i = 0; i < query_handles.size(); i++) {
 		const EditorElement *resolved = find_by_handle(cached_snapshot.roots, query_handles[i]);
 		if (resolved != nullptr && resolved->class_name != previous_classes[(size_t)i]) {

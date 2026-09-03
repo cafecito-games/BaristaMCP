@@ -208,6 +208,55 @@ class BaristaMCPSelectorTests(unittest.TestCase):
         self.assertIs(rejected["isError"], True)
         self.assertEqual(rejected["structuredContent"]["error"], "invalid_arguments")
 
+    def test_an_issued_id_replays_against_the_capture_that_issued_it(self) -> None:
+        # Snapshot ids are "s<generation>:<instance_id>" (src/editor_snapshot.cpp:394), so an id names
+        # the capture it came from. The id the server just issued must resolve against that capture.
+        issued = self.find(selector={"role": "button", "name": "Brew"})
+        element_id = issued["matches"][0]["id"]
+        self.assertTrue(element_id.startswith(f"s{issued['generation']}:"), element_id)
+
+        replay = self.find(selector={"id": element_id})
+        self.assertTrue(replay["ok"], replay)
+        self.assertEqual(replay["status"], "ok")
+        self.assertEqual(replay["match_count"], 1)
+        self.assertEqual(replay["generation"], issued["generation"])
+        self.assertEqual(replay["matches"][0]["id"], element_id)
+        self.assertEqual(replay["matches"][0]["handle"], issued["matches"][0]["handle"])
+
+        # An id nested in "within" names the same capture and resolves too.
+        nested = self.find(selector={"role": "button", "within": {"id": element_id}})
+        self.assertIn(nested["status"], ("ok", "no_match"), nested)
+        self.assertEqual(nested["generation"], issued["generation"])
+
+        # An id issued by inspect_editor_ui is the same vocabulary and replays the same way.
+        snapshot = self.client.structured_tool("inspect_editor_ui", {})
+        inspected_id = snapshot["tree"][0]["id"]
+        self.assertTrue(inspected_id.startswith(f"s{snapshot['generation']}:"), inspected_id)
+        inspected = self.find(selector={"id": inspected_id})
+        self.assertEqual(inspected["status"], "ok", inspected)
+        self.assertEqual(inspected["generation"], snapshot["generation"])
+        self.assertEqual(inspected["matches"][0]["id"], inspected_id)
+
+    def test_an_id_from_an_older_capture_is_still_stale(self) -> None:
+        # The replay path must not make every id resolvable: only the newest capture is replayable.
+        first = self.find(selector={"role": "button", "name": "Brew"})
+        older_id = first["matches"][0]["id"]
+
+        # A capture that pins no id retires the previous one.
+        newer = self.find(selector={"role": "button", "name": "Grind"})
+        self.assertNotEqual(newer["generation"], first["generation"])
+
+        stale = self.find(selector={"id": older_id})
+        self.assertEqual(stale["status"], "stale_handle", stale)
+        self.assertEqual(stale["matches"], [])
+        self.assertEqual(
+            self.find(selector={"role": "button", "within": {"id": older_id}})["status"],
+            "stale_handle",
+        )
+        # An id naming a capture that has not happened yet is stale, not a future match.
+        future_id = f"s{newer['generation'] + 1000}:{older_id.split(':', 1)[1]}"
+        self.assertEqual(self.find(selector={"id": future_id})["status"], "stale_handle")
+
     def test_stale_ids_and_unissued_handles_fail_closed(self) -> None:
         first = self.find(selector={"role": "button", "name": "Brew"})
         element_id = first["matches"][0]["id"]

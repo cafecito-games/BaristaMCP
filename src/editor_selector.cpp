@@ -206,6 +206,24 @@ bool element_selection_state(const EditorElement &p_element, bool &r_selected) {
 	return false;
 }
 
+// A snapshot id is "s<generation>:<instance_id>" exactly as produced by EditorSnapshot::add_node
+// (src/editor_snapshot.cpp:394). Anything else names no capture at all.
+bool parse_id_generation(const String &p_id, uint64_t &r_generation) {
+	if (!p_id.begins_with("s")) {
+		return false;
+	}
+	const int separator = p_id.find(":");
+	if (separator < 2) {
+		return false;
+	}
+	const String generation_text = p_id.substr(1, separator - 1);
+	if (!generation_text.is_valid_int() || generation_text.begins_with("-")) {
+		return false;
+	}
+	r_generation = (uint64_t)generation_text.to_int();
+	return true;
+}
+
 bool matches_fields(const EditorElement &p_element, const EditorSelectorQuery &p_query) {
 	if (p_query.has_id && p_element.id != p_query.id) {
 		return false;
@@ -361,6 +379,24 @@ PackedStringArray EditorSelector::handles(const EditorSelectorQuery &p_query) {
 	return found;
 }
 
+bool EditorSelector::pins_generation(const EditorSelectorQuery &p_query, uint64_t p_generation) {
+	bool pinned = false;
+	// Nesting is bounded by MAX_NESTING_DEPTH at parse time, so this walk is bounded too. A malformed
+	// id, or one from any other capture, answers false so the caller falls through to a fresh capture
+	// and the query still fails closed in match().
+	for (const EditorSelectorQuery *query = &p_query; query != nullptr; query = query->within.get()) {
+		if (!query->has_id) {
+			continue;
+		}
+		uint64_t id_generation = 0;
+		if (!parse_id_generation(query->id, id_generation) || id_generation != p_generation) {
+			return false;
+		}
+		pinned = true;
+	}
+	return pinned;
+}
+
 uint64_t EditorSelector::digest(const EditorSelectorQuery &p_query) {
 	const String canonical = EditorSelector::canonical(p_query);
 	return ((uint64_t)(uint32_t)canonical.hash()) | ((uint64_t)(uint32_t)canonical.length() << 32);
@@ -380,15 +416,8 @@ EditorSelector::Status EditorSelector::match(const EditorSnapshotData &p_data, c
 		if (!query->has_id) {
 			continue;
 		}
-		if (!query->id.begins_with("s")) {
-			return Status::STALE_HANDLE;
-		}
-		const int separator = query->id.find(":");
-		if (separator < 2) {
-			return Status::STALE_HANDLE;
-		}
-		const String generation_text = query->id.substr(1, separator - 1);
-		if (!generation_text.is_valid_int() || (uint64_t)generation_text.to_int() != p_data.generation) {
+		uint64_t id_generation = 0;
+		if (!parse_id_generation(query->id, id_generation) || id_generation != p_data.generation) {
 			return Status::STALE_HANDLE;
 		}
 	}
