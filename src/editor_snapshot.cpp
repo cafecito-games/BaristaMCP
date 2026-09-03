@@ -279,6 +279,7 @@ bool control_is_enabled(Control *p_control) {
 class SnapshotBuilder {
 	const EditorSnapshotOptions &options;
 	EditorSnapshotData &data;
+	int visited_nodes = 0;
 
 public:
 	SnapshotBuilder(const EditorSnapshotOptions &p_options, EditorSnapshotData &r_data)
@@ -323,7 +324,7 @@ public:
 					(options.include_internal &&
 							public_children.find((uint64_t)child->get_instance_id()) == public_children.end());
 			add_node(child, p_depth, p_node_depth, r_children, p_path, is_internal, r_truncated);
-			if (data.element_limit_reached) {
+			if (data.element_limit_reached || data.traversal_limit_reached) {
 				r_truncated = true;
 				return;
 			}
@@ -332,6 +333,14 @@ public:
 
 	void add_node(Node *p_node, int p_depth, int p_node_depth, std::vector<EditorElement> &r_children,
 			const String &p_path, bool p_internal, bool &r_truncated) {
+		// Every visited node costs budget, whether or not it becomes an element.
+		if (visited_nodes >= EditorSnapshotLimits::MAX_VISITED_NODES) {
+			data.traversal_limit_reached = true;
+			r_truncated = true;
+			return;
+		}
+		visited_nodes++;
+
 		Control *control = Object::cast_to<Control>(p_node);
 		Window *window = Object::cast_to<Window>(p_node);
 		if (control == nullptr && window == nullptr) {

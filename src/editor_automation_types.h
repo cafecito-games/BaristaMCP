@@ -34,6 +34,9 @@ struct EditorSnapshotLimits {
 	// Nodes that produce no element still consume this budget, so traversal is bounded even through a
 	// deep chain of nodes that are neither controls nor windows.
 	static constexpr int MAX_TRAVERSAL_DEPTH = 256;
+	// Total nodes one capture may visit, including nodes that emit no element, so a broad subtree of
+	// ordinary nodes cannot stall the editor either.
+	static constexpr int MAX_VISITED_NODES = 50000;
 	// Bounded strings keep a single pathological control from consuming the whole payload budget.
 	static constexpr int MAX_STRING_LENGTH = 200;
 	static constexpr int MAX_PATH_LENGTH = 512;
