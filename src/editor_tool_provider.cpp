@@ -9,6 +9,7 @@
 #include "editor_tool_provider.h"
 
 #include "mcp_contracts.h"
+#include "mcp_schema.h"
 
 #include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/engine.hpp>
@@ -40,7 +41,7 @@ Dictionary EditorToolProvider::_tool_result(const Dictionary &p_structured, bool
 	return result;
 }
 
-Dictionary EditorToolProvider::_status(bool p_initialized) const {
+Dictionary EditorToolProvider::status(bool p_initialized) const {
 	Dictionary status;
 	status["name"] = MCPContracts::SERVER_NAME;
 	status["version"] = MCPContracts::SERVER_VERSION;
@@ -52,7 +53,7 @@ Dictionary EditorToolProvider::_status(bool p_initialized) const {
 	return status;
 }
 
-Dictionary EditorToolProvider::_project_info() const {
+Dictionary EditorToolProvider::project_info() const {
 	ProjectSettings *project_settings = ProjectSettings::get_singleton();
 	Dictionary info;
 	info["project_name"] = project_settings->get_setting("application/config/name", "");
@@ -73,23 +74,45 @@ Dictionary EditorToolProvider::_project_info() const {
 	return info;
 }
 
+Dictionary EditorToolProvider::_tool_error(const String &p_error, const String &p_message) {
+	Dictionary error;
+	error["error"] = p_error;
+	error["message"] = p_message;
+	return _tool_result(error, true);
+}
+
+bool EditorToolProvider::read_resource(const String &p_uri, Dictionary &r_payload) const {
+	if (p_uri != MCPContracts::PROJECT_INFO_RESOURCE_URI) {
+		return false;
+	}
+	r_payload = project_info();
+	return true;
+}
+
 Dictionary EditorToolProvider::call(const String &p_name, const Dictionary &p_arguments, bool p_initialized) const {
-	if (p_name != "barista_status" && p_name != "get_project_info") {
-		Dictionary error;
-		error["error"] = "unknown_tool";
-		error["message"] = "Unknown tool '" + p_name + "'.";
-		return _tool_result(error, true);
+	Dictionary tool;
+	if (!MCPContracts::find_tool(p_name, tool)) {
+		return _tool_error("unknown_tool", "Unknown tool '" + p_name + "'.");
 	}
-	if (!p_arguments.is_empty()) {
-		Dictionary error;
-		error["error"] = "invalid_arguments";
-		error["message"] = "Tool '" + p_name + "' does not accept arguments.";
-		return _tool_result(error, true);
+
+	String schema_error;
+	if (!MCPSchema::validate(tool.get("inputSchema", Dictionary()), p_arguments, schema_error)) {
+		return _tool_error("invalid_arguments", "Tool '" + p_name + "' rejected its arguments: " + schema_error);
 	}
+
+	Dictionary structured;
 	if (p_name == "barista_status") {
-		return _tool_result(_status(p_initialized), false);
+		structured = status(p_initialized);
+	} else {
+		structured = project_info();
 	}
-	return _tool_result(_project_info(), false);
+
+	// The advertised outputSchema is a promise about structuredContent; never emit a payload that breaks it.
+	if (!MCPSchema::validate(tool.get("outputSchema", Dictionary()), structured, schema_error)) {
+		return _tool_error("output_contract_violation",
+				"Tool '" + p_name + "' produced output outside its advertised schema: " + schema_error);
+	}
+	return _tool_result(structured, false);
 }
 
 } // namespace godot
