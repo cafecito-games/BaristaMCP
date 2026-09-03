@@ -25,6 +25,10 @@ Add acceptance coverage for externally visible MCP behavior, transport security,
 
 History follows concise Conventional Commit prefixes such as `feat:`, `fix:`, `docs:`, and `chore:`. Keep each commit focused. PRs should explain behavior and security implications, list exact verification commands, link relevant issues, and include screenshots only for visible editor UI changes.
 
+## Licensing Headers
+
+The project is MIT licensed to Cafecito Games LLC. Every C++, Python, and GDScript source file carries the header produced by `scripts/add_license_header.py`; run it with no arguments to fill in any missing headers, or with `--check` to report them without editing. `prek install` wires the `.pre-commit-config.yaml` hook that adds the header at commit time, failing the commit when it had to modify a file so the change can be re-staged. Third-party and generated trees (`godot-cpp/`, `build/`, `bin/`, `cmake-build-debug/`) and the upstream-derived `methods.py` are excluded.
+
 ## Security & Compatibility
 
 Preserve stock Godot 4.7 compatibility. Adapt ideas from Foundry without depending on fork-only headers or private engine APIs. Keep the server loopback-only, never log or commit bearer tokens, validate untrusted protocol input, and do not commit generated binaries, `.godot/`, CMake output, or `docs/superpowers/`.

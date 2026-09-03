@@ -1,3 +1,11 @@
+/**************************************************************************/
+/*  editor_tool_provider.h                                                */
+/*                                                                        */
+/*  Copyright (c) 2026-present Cafecito Games LLC.                        */
+/*  This file is part of BaristaMCP, a Godot GDExtension.                 */
+/*  SPDX-License-Identifier: MIT                                          */
+/**************************************************************************/
+
 #ifndef BARISTA_MCP_EDITOR_TOOL_PROVIDER_H
 #define BARISTA_MCP_EDITOR_TOOL_PROVIDER_H
 

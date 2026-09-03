@@ -1,3 +1,9 @@
+# test_mcp_acceptance.py
+#
+# Copyright (c) 2026-present Cafecito Games LLC.
+# This file is part of BaristaMCP, a Godot GDExtension.
+# SPDX-License-Identifier: MIT
+
 from __future__ import annotations
 
 import json

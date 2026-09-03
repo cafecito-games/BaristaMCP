@@ -1,3 +1,11 @@
+/**************************************************************************/
+/*  mcp_server.cpp                                                        */
+/*                                                                        */
+/*  Copyright (c) 2026-present Cafecito Games LLC.                        */
+/*  This file is part of BaristaMCP, a Godot GDExtension.                 */
+/*  SPDX-License-Identifier: MIT                                          */
+/**************************************************************************/
+
 #include "mcp_server.h"
 
 #include <godot_cpp/classes/crypto.hpp>

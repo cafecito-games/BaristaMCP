@@ -1,0 +1,11 @@
+repos:
+  - repo: local
+    hooks:
+      - id: license-header
+        name: Add Cafecito Games license header
+        entry: python3 scripts/add_license_header.py --fail-on-change
+        language: system
+        pass_filenames: true
+        types: [file]
+        files: '\.(c|cc|cpp|h|hpp|inl|py|gd)$|^SConstruct$|SCsub$'
+        exclude: '^(godot-cpp|build|bin|cmake-build-debug|\.worktrees)/|^methods\.py$|(^|/)gen/'

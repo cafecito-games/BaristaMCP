@@ -1,3 +1,11 @@
+/**************************************************************************/
+/*  barista_mcp_plugin.cpp                                                */
+/*                                                                        */
+/*  Copyright (c) 2026-present Cafecito Games LLC.                        */
+/*  This file is part of BaristaMCP, a Godot GDExtension.                 */
+/*  SPDX-License-Identifier: MIT                                          */
+/**************************************************************************/
+
 #include "barista_mcp_plugin.h"
 
 #include <godot_cpp/classes/json.hpp>
