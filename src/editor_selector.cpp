@@ -344,11 +344,25 @@ bool EditorSelector::parse(const Variant &p_selector, EditorSelectorQuery &r_que
 	return parse_query(p_selector, r_query, 0, r_message);
 }
 
+String EditorSelector::canonical(const EditorSelectorQuery &p_query) {
+	String text;
+	digest_into(p_query, text);
+	return text;
+}
+
+PackedStringArray EditorSelector::handles(const EditorSelectorQuery &p_query) {
+	PackedStringArray found;
+	// Nesting is bounded by MAX_NESTING_DEPTH at parse time, so this walk is bounded too.
+	for (const EditorSelectorQuery *query = &p_query; query != nullptr; query = query->within.get()) {
+		if (query->has_handle) {
+			found.push_back(query->handle);
+		}
+	}
+	return found;
+}
+
 uint64_t EditorSelector::digest(const EditorSelectorQuery &p_query) {
-	String canonical;
-	digest_into(p_query, canonical);
-	// The canonical form is injective, so folding its length into the hash keeps selectors of different
-	// shapes apart even where the 32-bit string hash would collide.
+	const String canonical = EditorSelector::canonical(p_query);
 	return ((uint64_t)(uint32_t)canonical.hash()) | ((uint64_t)(uint32_t)canonical.length() << 32);
 }
 

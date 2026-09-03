@@ -74,9 +74,14 @@ public:
 	// unknown field, a field of the wrong type, an over-long value, or excessive "within" nesting.
 	static bool parse(const Variant &p_selector, EditorSelectorQuery &r_query, String &r_message);
 
-	// A stable digest of the parsed selector, used as part of cursor identity so a page cannot be
-	// resumed against a different query.
+	// The injective canonical form of a parsed selector. Two selectors are the same query exactly when
+	// their canonical forms are equal, so cursor identity is checked against this text, not a hash.
+	static String canonical(const EditorSelectorQuery &p_query);
+	// A cheap digest of the canonical form carried inside a cursor. It narrows a mismatch early; the
+	// canonical form is what actually decides identity.
 	static uint64_t digest(const EditorSelectorQuery &p_query);
+	// Every handle named anywhere in the query, including inside "within".
+	static PackedStringArray handles(const EditorSelectorQuery &p_query);
 
 	// Collects matching elements in document order. r_total counts every match; r_page holds the
 	// matches inside [p_offset, p_offset + p_limit). Returns STALE_HANDLE when the selector pins an id

@@ -39,6 +39,9 @@ class EditorAutomationService {
 	// page boundary always refers to the generation its cursor names.
 	EditorSnapshotData cached_snapshot;
 	bool has_cached_snapshot = false;
+	// The canonical form of the selector that produced the cached capture. A cursor is resumable only
+	// for that exact query, so identity never rests on a hash alone.
+	String cached_selector;
 
 	// Captures a snapshot inside the published payload budget and registers every handle it issued.
 	bool _capture(const EditorSnapshotOptions &p_requested, EditorSnapshotData &r_data, Dictionary &r_payload,

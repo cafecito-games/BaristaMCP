@@ -165,8 +165,17 @@ class BaristaMCPSelectorTests(unittest.TestCase):
         self.assertEqual(rejected["matches"], [])
         self.assertGreater(rejected["match_count"], 1)
 
-        unique = self.find(selector={"role": "button", "name": "Brew"}, require_unique=True)
-        self.assertTrue(unique["ok"])
+        # Uniqueness can only be certified against a capture that omitted nothing.
+        unique = self.find(
+            selector={"role": "button", "name": "Brew"}, require_unique=True, max_depth=32
+        )
+        self.assertTrue(unique["ok"], unique)
+        self.assertIs(unique["truncated"], False)
+
+        truncated = self.find(selector={"role": "button", "name": "Brew"}, require_unique=True)
+        self.assertFalse(truncated["ok"], truncated)
+        self.assertEqual(truncated["status"], "ambiguous_selector")
+        self.assertIs(truncated["truncated"], True)
 
     def test_malformed_selectors_are_rejected(self) -> None:
         for selector in (
@@ -224,6 +233,25 @@ class BaristaMCPSelectorTests(unittest.TestCase):
         for malformed_id in ("", "el:1", "sx:1", "s:1", "9:1"):
             with self.subTest(element_id=malformed_id):
                 self.assertEqual(self.find(selector={"id": malformed_id})["status"], "stale_handle")
+
+    def test_handles_nested_in_within_are_validated(self) -> None:
+        issued = self.find(selector={"role": "button", "name": "Brew"})["matches"][0]["handle"]
+
+        # A handle nested inside "within" is checked against the issued-handle registry too.
+        nested = self.find(
+            selector={"role": "button", "within": {"handle": "el:999999999999"}}
+        )
+        self.assertEqual(nested["status"], "stale_handle", nested)
+        self.assertEqual(nested["matches"], [])
+
+        resolvable = self.find(selector={"role": "button", "within": {"handle": issued}})
+        self.assertIn(resolvable["status"], ("ok", "no_match"))
+
+    def test_a_resolvable_handle_with_a_failing_constraint_is_not_stale(self) -> None:
+        handle = self.find(selector={"role": "button", "name": "Brew"})["matches"][0]["handle"]
+        result = self.find(selector={"handle": handle, "name": "Not The Brew Button"})
+        # The handle resolved; another constraint failed, and saying "stale" would be a wrong verdict.
+        self.assertEqual(result["status"], "no_match", result)
 
     def test_pagination_is_bounded_and_cursors_fail_closed(self) -> None:
         selector = {"role": "button"}

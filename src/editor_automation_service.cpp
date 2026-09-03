@@ -218,6 +218,8 @@ Dictionary EditorAutomationService::inspect_ui(const Dictionary &p_arguments, St
 	}
 	cached_snapshot = data;
 	has_cached_snapshot = true;
+	// This capture belongs to no selector, so no cursor can be resumed against it.
+	cached_selector = String();
 	return payload;
 }
 
@@ -227,8 +229,12 @@ Dictionary EditorAutomationService::read_element(
 	r_message = String();
 	EditorSnapshotData data;
 	const EditorElement *element = nullptr;
+	// Handle resolution must not depend on options the URI cannot express: a handle issued by any
+	// capture resolves here, so the widest published capture is used.
 	EditorSnapshotOptions options;
 	options.max_depth = EditorSnapshotLimits::MAX_MAX_DEPTH;
+	options.max_elements = EditorSnapshotLimits::MAX_MAX_ELEMENTS;
+	options.include_internal = true;
 	if (!_resolve_handle(p_handle, options, data, &element, r_error, r_message)) {
 		return Dictionary();
 	}
@@ -311,7 +317,7 @@ Dictionary EditorAutomationService::find_ui(const Dictionary &p_arguments, Strin
 			return find_failure(EditorSelector::Status::INVALID_CURSOR,
 					"Cursor snapshot options do not match this request.", limit);
 		}
-		if (cursor.selector_digest != selector_digest) {
+		if (cursor.selector_digest != selector_digest || cached_selector != EditorSelector::canonical(query)) {
 			return find_failure(
 					EditorSelector::Status::INVALID_CURSOR, "Cursor was issued for a different selector.", limit);
 		}
@@ -325,23 +331,24 @@ Dictionary EditorAutomationService::find_ui(const Dictionary &p_arguments, Strin
 		resume = true;
 	}
 
-	// The registry is consulted before this request captures anything. Capturing first would register
-	// every live handle, so a handle Barista had never issued would be admitted by the very request
-	// that supplied it, and the class recorded for a reused instance id would be overwritten before it
-	// could be compared.
-	String previous_class;
-	if (query.has_handle) {
+	// The registry is consulted before this request captures anything, and for every handle the query
+	// names, including the ones nested in "within". Capturing first would register every live handle,
+	// so a handle Barista had never issued would be admitted by the very request that supplied it, and
+	// the class recorded for a reused instance id would be overwritten before it could be compared.
+	const PackedStringArray query_handles = EditorSelector::handles(query);
+	std::vector<String> previous_classes;
+	for (int i = 0; i < query_handles.size(); i++) {
 		uint64_t instance_id = 0;
-		if (!parse_handle(query.handle, instance_id)) {
+		if (!parse_handle(query_handles[i], instance_id)) {
 			return find_failure(EditorSelector::Status::STALE_HANDLE,
-					"Handle '" + query.handle + "' was not issued by Barista.", limit);
+					"Handle '" + query_handles[i] + "' was not issued by Barista.", limit);
 		}
 		const auto issued = issued_handles.find(instance_id);
 		if (issued == issued_handles.end()) {
 			return find_failure(EditorSelector::Status::STALE_HANDLE,
-					"Handle '" + query.handle + "' was not issued by Barista.", limit);
+					"Handle '" + query_handles[i] + "' was not issued by Barista.", limit);
 		}
-		previous_class = issued->second.class_name;
+		previous_classes.push_back(issued->second.class_name);
 	}
 
 	if (!resume) {
@@ -352,6 +359,17 @@ Dictionary EditorAutomationService::find_ui(const Dictionary &p_arguments, Strin
 		}
 		cached_snapshot = data;
 		has_cached_snapshot = true;
+		cached_selector = EditorSelector::canonical(query);
+	}
+
+	// The capture above reissued these handles, so comparing against the class recorded before it is
+	// what detects an instance id that now belongs to a different object.
+	for (int i = 0; i < query_handles.size(); i++) {
+		const EditorElement *resolved = find_by_handle(cached_snapshot.roots, query_handles[i]);
+		if (resolved != nullptr && resolved->class_name != previous_classes[(size_t)i]) {
+			return find_failure(EditorSelector::Status::STALE_HANDLE,
+					"Handle '" + query_handles[i] + "' now refers to a different object type.", limit);
+		}
 	}
 
 	std::vector<const EditorElement *> page;
@@ -364,29 +382,31 @@ Dictionary EditorAutomationService::find_ui(const Dictionary &p_arguments, Strin
 				"Element id '" + query.id + "' was issued for another capture.", limit);
 	}
 	if (status == EditorSelector::Status::NO_MATCH) {
-		if (query.has_handle) {
-			return find_payload(false, EditorSelector::status_name(EditorSelector::Status::STALE_HANDLE),
-					"Handle '" + query.handle + "' no longer resolves to a captured element.",
-					cached_snapshot.generation, 0, offset, limit, visit_limit_reached, String(), Array());
+		// A handle that is present in the capture resolved: some other constraint is what failed, and
+		// reporting that as a stale handle would be a wrong verdict.
+		for (int i = 0; i < query_handles.size(); i++) {
+			if (find_by_handle(cached_snapshot.roots, query_handles[i]) == nullptr) {
+				return find_payload(false, EditorSelector::status_name(EditorSelector::Status::STALE_HANDLE),
+						"Handle '" + query_handles[i] + "' no longer resolves to a captured element.",
+						cached_snapshot.generation, 0, offset, limit, visit_limit_reached, String(), Array());
+			}
 		}
 		return find_payload(false, EditorSelector::status_name(EditorSelector::Status::NO_MATCH),
 				"No element matched the selector.", cached_snapshot.generation, 0, offset, limit, visit_limit_reached,
 				String(), Array());
 	}
-	// A truncated walk only ever counts a lower bound, so uniqueness cannot be established from it.
-	if (require_unique && (total > 1 || visit_limit_reached)) {
+	// A truncated walk, or a capture that omitted elements before matching began, only ever counts a
+	// lower bound, so uniqueness cannot be established from either.
+	const bool snapshot_truncated = cached_snapshot.depth_truncated || cached_snapshot.element_limit_reached ||
+			cached_snapshot.traversal_limit_reached;
+	if (require_unique && (total > 1 || visit_limit_reached || snapshot_truncated)) {
 		const String reason = total > 1
 				? "The selector matched " + String::num_int64(total) + " elements where exactly one is required."
-				: "The match budget was exhausted, so the selector cannot be shown to match exactly one element.";
+				: "The capture was truncated, so the selector cannot be shown to match exactly one element. "
+				  "Raise max_depth or max_elements and try again.";
 		return find_payload(false, EditorSelector::status_name(EditorSelector::Status::AMBIGUOUS_SELECTOR), reason,
-				cached_snapshot.generation, total, offset, limit, visit_limit_reached, String(), Array());
-	}
-	// The capture above reissued this handle, so comparing against the class recorded before the
-	// capture is what detects an instance id that now belongs to a different object.
-	if (query.has_handle && !page.empty() && page[0]->class_name != previous_class) {
-		return find_payload(false, EditorSelector::status_name(EditorSelector::Status::STALE_HANDLE),
-				"Handle '" + query.handle + "' now refers to a different object type.", cached_snapshot.generation, 0,
-				offset, limit, visit_limit_reached, String(), Array());
+				cached_snapshot.generation, total, offset, limit, visit_limit_reached || snapshot_truncated, String(),
+				Array());
 	}
 
 	Array matches;
@@ -419,6 +439,7 @@ void EditorAutomationService::shutdown() {
 	issued_handles.clear();
 	cached_snapshot = EditorSnapshotData();
 	has_cached_snapshot = false;
+	cached_selector = String();
 }
 
 } // namespace godot
