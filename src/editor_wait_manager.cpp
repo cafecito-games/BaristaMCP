@@ -464,7 +464,14 @@ bool EditorWaitManager::_evaluate(EditorWait &r_wait, const EditorWaitContext &p
 
 	if (condition.type == CONDITION_FOCUS_CHANGED) {
 		r_wait.detail["focused_handle"] = p_context.focused_handle;
-		return p_context.focused_handle != r_wait.baseline_focus_handle;
+		if (p_context.focused_handle == r_wait.baseline_focus_handle) {
+			return false;
+		}
+		// Focus arriving at an element this capture actually reached is positive evidence, and a
+		// bounded walk cannot falsify it. Focus reading as "nothing" is a different claim: a capture
+		// that was cut short may simply have omitted the element that still holds focus, so absence
+		// of focus is only ever reported from a capture that was not truncated.
+		return !p_context.focused_handle.is_empty() || !truncated;
 	}
 	if (condition.selector == nullptr) {
 		return false;
@@ -549,6 +556,16 @@ Dictionary EditorWaitManager::start(
 		return _payload(nullptr, Status::UNSUPPORTED_CAPABILITY,
 				"The editor UI could not be captured, so this condition cannot be evaluated.", condition_type,
 				p_context.now_ms);
+	}
+	// A focus wait is judged against the focus this capture saw. A capture that was cut short may
+	// have omitted the element that holds focus, so it cannot establish a baseline and the wait is
+	// refused rather than parked on a baseline that was never true.
+	if (condition_type == CONDITION_FOCUS_CHANGED && p_context.snapshot != nullptr &&
+			snapshot_truncated(*p_context.snapshot)) {
+		return _payload(nullptr, Status::UNSUPPORTED_CAPABILITY,
+				"The editor UI capture was truncated, so the element holding focus cannot be established as a "
+				"baseline.",
+				condition_type, p_context.now_ms);
 	}
 	if (condition_type == CONDITION_FILESYSTEM_SETTLES && !p_context.filesystem_available) {
 		return _payload(nullptr, Status::UNSUPPORTED_CAPABILITY,
