@@ -19,11 +19,23 @@ const COUNTERS_NAME := "Action Counters"
 ## many parents that each hold a wide child list.
 const WIDE_INTERNAL_CHILDREN_SETTING := "barista_mcp_test_fixture/wide_internal_children"
 const WIDE_INTERNAL_GROUP_SIZE := 250
+## Name of the control that exists only as an internal child of the fixture panel. It is reachable
+## through a capture that includes internal children and through no other capture, so a verdict about
+## its presence or absence is only sound when the verdict was decided over that wider domain.
+const INTERNAL_ONLY_NAME := "Internal Only Field"
+## The embedded window and the two focusable fields inside it. Godot reports both an active window
+## and the control that owns the keyboard as focused, so focus moving between these two fields must
+## be observable as a change of the reported focus owner.
+const DIALOG_NAME := "Fixture Dialog"
+const DIALOG_TOGGLE_NAME := "Dialog Visible"
+const DIALOG_FIELD_A := "Dialog Field A"
+const DIALOG_FIELD_B := "Dialog Field B"
 ## Length cap published by the "Ticket" field, so a test can request text the field can never hold.
 const TICKET_MAX_LENGTH := 8
 
 var _panel: PanelContainer = null
 var _counters: Label = null
+var _dialog: Window = null
 ## Counts the editor signals the signalling actions are expected to raise, published as label text so
 ## an acceptance test observes an action through a fresh snapshot rather than through the tool's own
 ## report of itself. Text actions raise no signal that a control method and an input event share, so
@@ -233,9 +245,25 @@ func _enter_tree() -> void:
 	column.add_child(_counters)
 	_publish_counts()
 
+	## Shows and hides the embedded window below. The window stays hidden until a test asks for it, so
+	## the default editor surface every other test observes is unchanged.
+	var dialog_toggle := CheckBox.new()
+	dialog_toggle.name = DIALOG_TOGGLE_NAME
+	dialog_toggle.set_accessibility_name(DIALOG_TOGGLE_NAME)
+	dialog_toggle.toggled.connect(_set_dialog_visible)
+	column.add_child(dialog_toggle)
+
+	## A real control reachable only through a capture that includes internal children. Nothing about
+	## it is hidden from the editor: it is simply outside the default capture domain.
+	var internal_only := LineEdit.new()
+	internal_only.name = INTERNAL_ONLY_NAME
+	internal_only.set_accessibility_name(INTERNAL_ONLY_NAME)
+	column.add_child(internal_only, false, Node.INTERNAL_MODE_BACK)
+
 	_add_wide_internal_subtree()
 
 	base_control.add_child(_panel)
+	_add_dialog(base_control)
 
 
 ## Builds a large internal subtree of plain nodes: many parents, each holding a wide child list.
@@ -259,6 +287,35 @@ func _add_wide_internal_subtree() -> void:
 	_panel.add_child(filler_root, false, Node.INTERNAL_MODE_BACK)
 
 
+## Builds an embedded window holding two focusable fields. The window is what the engine reports as
+## the active window while either field owns the keyboard, so it is the shape that separates "the
+## focused window" from "the control that actually holds focus".
+func _add_dialog(base_control: Control) -> void:
+	_dialog = Window.new()
+	_dialog.name = DIALOG_NAME
+	_dialog.title = DIALOG_NAME
+	_dialog.position = Vector2i(400, 24)
+	_dialog.size = Vector2i(240, 120)
+	var fields := VBoxContainer.new()
+	fields.name = "Dialog Fields"
+	var field_a := LineEdit.new()
+	field_a.name = DIALOG_FIELD_A
+	field_a.set_accessibility_name(DIALOG_FIELD_A)
+	fields.add_child(field_a)
+	var field_b := LineEdit.new()
+	field_b.name = DIALOG_FIELD_B
+	field_b.set_accessibility_name(DIALOG_FIELD_B)
+	fields.add_child(field_b)
+	_dialog.add_child(fields)
+	_dialog.hide()
+	base_control.add_child(_dialog)
+
+
+func _set_dialog_visible(visible: bool) -> void:
+	if _dialog != null and is_instance_valid(_dialog):
+		_dialog.visible = visible
+
+
 func _bump(counter: String) -> void:
 	_counts[counter] = int(_counts[counter]) + 1
 	_publish_counts()
@@ -274,6 +331,12 @@ func _publish_counts() -> void:
 
 
 func _exit_tree() -> void:
+	if _dialog != null:
+		if is_instance_valid(_dialog):
+			if _dialog.get_parent() != null:
+				_dialog.get_parent().remove_child(_dialog)
+			_dialog.queue_free()
+		_dialog = null
 	if _panel == null:
 		return
 	_counters = null

@@ -842,19 +842,44 @@ Dictionary EditorAutomationService::poll_events(const Dictionary &p_arguments, S
 
 namespace {
 
-// The first focused element in document order. Focus identity is published as a durable handle, so a
-// focus change is compared between captures rather than against a capture-scoped element id.
-const EditorElement *find_focused(const std::vector<EditorElement> &p_elements) {
+// The deepest focused element of a subtree. Children are examined before the element itself, because
+// Godot reports both an active Window and the control inside it that owns the keyboard as focused,
+// and it is the control a client can name and act on.
+const EditorElement *find_deepest_focused(const std::vector<EditorElement> &p_elements) {
 	for (const EditorElement &element : p_elements) {
+		const EditorElement *found = find_deepest_focused(element.children);
+		if (found != nullptr) {
+			return found;
+		}
 		if (element.focused) {
 			return &element;
 		}
-		const EditorElement *found = find_focused(element.children);
+	}
+	return nullptr;
+}
+
+// The focus owner of the focused Window, when the capture reached one. Every viewport retains its own
+// focus owner, so a control in a background window keeps reporting focus while a dialog is up; only
+// the focused window's owner actually holds the keyboard.
+const EditorElement *find_focused_window_owner(const std::vector<EditorElement> &p_elements) {
+	for (const EditorElement &element : p_elements) {
+		if (element.is_window && element.focused) {
+			const EditorElement *owner = find_deepest_focused(element.children);
+			return owner == nullptr ? &element : owner;
+		}
+		const EditorElement *found = find_focused_window_owner(element.children);
 		if (found != nullptr) {
 			return found;
 		}
 	}
 	return nullptr;
+}
+
+// The element a focus wait tracks. Focus identity is published as a durable handle, so a focus change
+// is compared between captures rather than against a capture-scoped element id.
+const EditorElement *find_focused(const std::vector<EditorElement> &p_elements) {
+	const EditorElement *owner = find_focused_window_owner(p_elements);
+	return owner == nullptr ? find_deepest_focused(p_elements) : owner;
 }
 
 } // namespace
@@ -876,11 +901,19 @@ void EditorAutomationService::_build_wait_context(
 	if (!p_capture) {
 		return;
 	}
-	// Wait evaluation always uses the default published capture options, so a wait can only ever
-	// observe elements a default capture reaches. It deliberately does not go through _capture: the
-	// public generation, the issued-handle registry, and the cached capture a cursor resumes against
-	// are request-owned state that a background frame must never move.
-	const EditorSnapshotOptions options;
+	// Wait evaluation must see every element a client can name. A selector reaches internal children
+	// and the full published depth through inspect_editor_ui and find_editor_ui, so a wait judged
+	// against a narrower capture would decide presence, absence, uniqueness, or focus over a domain
+	// that never contained the element the client asked about. The widest published options are used
+	// here for the same reason read_element uses them, and truncation still guards every verdict that
+	// needs an exhaustive walk. It deliberately does not go through _capture: the public generation,
+	// the issued-handle registry, and the cached capture a cursor resumes against are request-owned
+	// state that a background frame must never move, and no wait capture is ever serialized, so the
+	// payload budget that shrinks a request capture does not apply.
+	EditorSnapshotOptions options;
+	options.max_depth = EditorSnapshotLimits::MAX_MAX_DEPTH;
+	options.max_elements = EditorSnapshotLimits::MAX_MAX_ELEMENTS;
+	options.include_internal = true;
 	if (!EditorSnapshot::capture(editor_interface, 0, options, r_snapshot)) {
 		return;
 	}

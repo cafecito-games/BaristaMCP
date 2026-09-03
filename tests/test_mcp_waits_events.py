@@ -12,6 +12,7 @@ import json
 import re
 import socket
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -23,6 +24,7 @@ from mcp_test_support import (  # noqa: E402
     ROOT,
     EditorProcess,
     MCPClient,
+    write_test_project,
 )
 
 PINNED_EXTENSION_API = ROOT / "godot-cpp" / "gdextension" / "extension_api-4-7.json"
@@ -30,8 +32,16 @@ BUILD_PROFILE = ROOT / "build_profile.json"
 WAIT_TOOL = "wait_for_editor"
 EVENTS_TOOL = "poll_barista_events"
 ACT_TOOL = "act_on_editor_ui"
+FIND_TOOL = "find_editor_ui"
+INSPECT_TOOL = "inspect_editor_ui"
 AUTOMATION_ARGUMENT = "--barista-mcp-automation"
 FIXTURE_NAME = "Barista Test Fixture"
+# Fixture controls that exist only to separate the domain a wait evaluates over from the domain a
+# client can name. Mirrored from project/addons/barista_mcp_test_fixture/plugin.gd.
+INTERNAL_ONLY_NAME = "Internal Only Field"
+DIALOG_TOGGLE_NAME = "Dialog Visible"
+DIALOG_FIELD_A = "Dialog Field A"
+DIALOG_FIELD_B = "Dialog Field B"
 
 # One definition of the wait status vocabulary, mirrored from EditorWaitManager::status_vocabulary in
 # src/editor_wait_manager.cpp. Every consumer below must handle or reject every value.
@@ -722,6 +732,70 @@ class BaristaMCPActionTraceTests(WaitClientMixin, unittest.TestCase):
         finally:
             self.drain(started["wait_id"])
 
+    def test_a_focus_wait_reports_the_control_that_holds_focus_not_its_window(self) -> None:
+        """A focused Window and the control inside it that owns the keyboard are both focused.
+
+        Godot reports focus on the active window and, independently, on that window's focus owner
+        (src/editor_snapshot.cpp SnapshotBuilder::add_node reads Control::has_focus and
+        Window::has_focus into the same field). A wait that tracked the window would see no change
+        when focus moves between two controls of the same dialog.
+        """
+        shown = self.act(
+            selector=within_fixture(name=DIALOG_TOGGLE_NAME), action="set_checked", checked=True
+        )
+        self.assertIs(shown["ok"], True, shown)
+        try:
+            anchored = self.act(selector={"name": DIALOG_FIELD_A}, action="focus")
+            self.assertIs(anchored["ok"], True, anchored)
+            started = self.wait(condition={"type": "focus_changed"}, timeout_ms=10000)
+            self.assertEqual(started["status"], "pending", started)
+            try:
+                moved = self.act(selector={"name": DIALOG_FIELD_B}, action="focus")
+                self.assertIs(moved["ok"], True, moved)
+                finished = self.poll_until_terminal(started["wait_id"])
+                self.assertEqual(finished["status"], "complete", finished)
+                self.assertEqual(finished["detail"]["focused_handle"], moved["handle"], finished)
+            finally:
+                self.drain(started["wait_id"])
+        finally:
+            self.act(
+                selector=within_fixture(name=DIALOG_TOGGLE_NAME), action="set_checked", checked=False
+            )
+
+    def test_a_disappearance_wait_never_proves_absence_of_an_internal_element(self) -> None:
+        """The element is nameable through a capture that includes internal children.
+
+        A wait judged against a capture that excludes them would report absence over a domain that
+        never contained it, and excluding internal children raises no truncation flag
+        (src/editor_snapshot.cpp SnapshotBuilder::collect_children).
+        """
+        located = self.client.structured_tool(
+            FIND_TOOL,
+            {"selector": {"name": INTERNAL_ONLY_NAME}, "include_internal": True, "require_unique": True},
+        )
+        self.assertIs(located["ok"], True, located)
+        self.assertTrue(located["matches"][0]["internal"], located)
+
+        started = self.wait(
+            condition={"type": "selector_disappears", "selector": {"name": INTERNAL_ONLY_NAME}},
+            timeout_ms=1000,
+        )
+        self.assertEqual(started["status"], "pending", started)
+        try:
+            finished = self.poll_until_terminal(started["wait_id"])
+            self.assertEqual(finished["status"], "wait_timeout", finished)
+        finally:
+            self.drain(started["wait_id"])
+
+    def test_an_appearance_wait_reaches_an_internal_element(self) -> None:
+        """The same domain that must not prove absence must be able to prove presence."""
+        completed = self.wait(
+            condition={"type": "selector_appears", "selector": {"name": INTERNAL_ONLY_NAME}},
+            timeout_ms=1000,
+        )
+        self.assertEqual(completed["status"], "complete", completed)
+        self.assertEqual(completed["wait_id"], "", completed)
+
     def test_a_state_wait_completes_when_the_named_element_changes(self) -> None:
         started = self.wait(
             condition={
@@ -739,6 +813,52 @@ class BaristaMCPActionTraceTests(WaitClientMixin, unittest.TestCase):
         finally:
             self.drain(started["wait_id"])
             self.act(selector=within_fixture(name="Order"), action="set_text", text="")
+
+
+class BaristaMCPWaitTruncationTests(WaitClientMixin, unittest.TestCase):
+    """A capture that was cut short can never prove that nothing matched."""
+
+    # Mirrored from BaristaMCPUISnapshotTraversalBudgetTests in tests/test_mcp_ui_snapshot.py: enough
+    # plain internal nodes to exhaust EditorSnapshotLimits::MAX_VISITED_NODES
+    # (src/editor_automation_types.h) part way through a child scan.
+    WIDE_INTERNAL_CHILDREN = 60_000
+
+    def test_a_truncated_capture_never_completes_a_disappearance_wait(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="barista-mcp-wait-truncation-") as temporary:
+            project_dir = Path(temporary)
+            write_test_project(
+                project_dir,
+                "[barista_mcp_test_fixture]\n"
+                f"wide_internal_children={self.WIDE_INTERNAL_CHILDREN}",
+                extra_plugins=("barista_mcp_test_fixture",),
+            )
+            editor = EditorProcess(project_dir)
+            try:
+                editor.start()
+                self.client = MCPClient(editor.wait_for_discovery(timeout=60.0))
+                self.client.initialize()
+
+                # The wait context captures the widest published domain, which this project cannot
+                # walk exhaustively. The same domain read through the request surface says so.
+                capture = self.client.structured_tool(
+                    INSPECT_TOOL,
+                    {"max_depth": 32, "max_elements": 2000, "include_internal": True},
+                )
+                self.assertTrue(capture["truncated"], capture["limits"])
+
+                started = self.wait(
+                    condition={
+                        "type": "selector_disappears",
+                        "selector": {"name": "No Such Editor Control"},
+                    },
+                    timeout_ms=1000,
+                )
+                self.assertEqual(started["status"], "pending", started)
+                finished = self.poll_until_terminal(started["wait_id"], timeout=30.0)
+                self.assertEqual(finished["status"], "wait_timeout", finished)
+                self.assertIs(finished["detail"]["truncated"], True, finished)
+            finally:
+                editor.stop()
 
 
 class BaristaMCPWaitShutdownTests(unittest.TestCase):
