@@ -24,7 +24,11 @@ namespace godot {
 struct EditorSnapshotLimits {
 	static constexpr int MIN_MAX_DEPTH = 1;
 	static constexpr int MAX_MAX_DEPTH = 32;
-	static constexpr int DEFAULT_MAX_DEPTH = 8;
+	// The editor's own control tree is deeper than a shallow default can reach, and a truncated
+	// capture can never certify uniqueness, so the default is the clamp maximum: at 8 the capture is
+	// depth-truncated and require_unique always answers ambiguous_selector, while at 32 it is
+	// untruncated and stays far inside the element and payload budgets below.
+	static constexpr int DEFAULT_MAX_DEPTH = MAX_MAX_DEPTH;
 	static constexpr int MIN_MAX_ELEMENTS = 1;
 	static constexpr int MAX_MAX_ELEMENTS = 2000;
 	static constexpr int DEFAULT_MAX_ELEMENTS = 1000;
@@ -70,6 +74,50 @@ struct EditorElement {
 	PackedStringArray actions;
 	Dictionary state;
 	std::vector<EditorElement> children;
+};
+
+// Bounds every selector query, its match walk, and the pagination cursors issued for it.
+struct EditorSelectorLimits {
+	// A selector may nest "within" this many times before it is rejected as invalid.
+	static constexpr int MAX_NESTING_DEPTH = 4;
+	static constexpr int MIN_LIMIT = 1;
+	static constexpr int MAX_LIMIT = 200;
+	static constexpr int DEFAULT_LIMIT = 50;
+	static constexpr int MIN_OFFSET = 0;
+	// A snapshot never holds more than MAX_MAX_ELEMENTS elements, so no honest cursor can point past
+	// this offset; anything larger is rejected instead of being clamped.
+	static constexpr int MAX_OFFSET = EditorSnapshotLimits::MAX_MAX_ELEMENTS;
+	// Units of matching work one query may spend. Visiting an element costs one, and every ancestor
+	// consulted for a "within" constraint costs one more, so a deep tree cannot stall the editor.
+	static constexpr int MAX_MATCH_VISITS = 400000;
+	// Longest accepted selector string value. Longer values cannot match a bounded element field.
+	static constexpr int MAX_VALUE_LENGTH = 512;
+	static constexpr int MAX_CURSOR_LENGTH = 1024;
+};
+
+// Bounds the registry of handles Barista has issued. A handle that is not in the registry is stale by
+// definition, so the registry can never grow without limit and can never be bypassed.
+struct EditorHandleLimits {
+	static constexpr int MAX_ISSUED_HANDLES = 20000;
+	static constexpr const char *HANDLE_PREFIX = "el:";
+};
+
+// Bounds the edited-scene traversal published by EditorStateReader.
+struct EditorSceneLimits {
+	static constexpr int MAX_DEPTH = 32;
+	static constexpr int MAX_NODES = 2000;
+	static constexpr int MAX_VISITED_NODES = 50000;
+	static constexpr int MAX_LIST_ITEMS = 64;
+};
+
+// One page of selector matches. Cursor identity carries the snapshot generation, the snapshot options,
+// and the selector itself, so a page can never be resumed against a different capture or query.
+struct EditorSelectorCursor {
+	uint64_t generation = 0;
+	EditorSnapshotOptions options;
+	int offset = 0;
+	int limit = EditorSelectorLimits::DEFAULT_LIMIT;
+	uint64_t selector_digest = 0;
 };
 
 struct EditorSnapshotData {

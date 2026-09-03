@@ -25,6 +25,10 @@ public:
 	static Dictionary array(const Dictionary &p_items, const String &p_description = String());
 	static Dictionary string(const String &p_description = String());
 	static Dictionary integer(const String &p_description = String());
+	// An integer restricted to an explicit range. Every numeric field that crosses the boundary into a
+	// fixed-width integer must advertise one, so an unrepresentable JSON number is rejected rather than
+	// converted.
+	static Dictionary ranged_integer(int64_t p_minimum, int64_t p_maximum, const String &p_description = String());
 	static Dictionary number(const String &p_description = String());
 	static Dictionary boolean(const String &p_description = String());
 	// A closed string vocabulary. The advertised values are the values the validator accepts.

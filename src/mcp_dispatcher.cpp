@@ -187,12 +187,21 @@ Dictionary MCPDispatcher::handle_message(const Dictionary &p_message, bool &r_ha
 		const Dictionary params = p_message.get("params", Variant());
 		const String uri = params.get("uri", Variant());
 		Dictionary resource;
-		if (!MCPContracts::find_resource(uri, resource)) {
+		String handle;
+		if (!MCPContracts::resolve_resource(uri, resource, handle)) {
 			return _make_error(id, INVALID_PARAMS, "Unknown resource uri '" + uri + "'.");
 		}
 		Dictionary payload;
-		if (!tool_provider.read_resource(uri, payload)) {
-			return _make_error(id, INVALID_PARAMS, "Unknown resource uri '" + uri + "'.");
+		String read_error;
+		String read_message;
+		if (!tool_provider.read_resource(uri, handle, payload, read_error, read_message)) {
+			if (read_error.is_empty()) {
+				return _make_error(id, INVALID_PARAMS, "Unknown resource uri '" + uri + "'.");
+			}
+			Dictionary data;
+			data["error"] = read_error;
+			data["uri"] = uri;
+			return _make_error(id, INVALID_PARAMS, read_message, data);
 		}
 
 		const String text = JSON::stringify(payload, "", false);

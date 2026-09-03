@@ -457,38 +457,43 @@ public:
 Array serialize_elements(const std::vector<EditorElement> &p_elements) {
 	Array serialized;
 	for (const EditorElement &element : p_elements) {
-		Dictionary entry;
-		entry["id"] = element.id;
-		entry["handle"] = element.handle;
-		entry["role"] = element.role;
-		entry["name"] = element.name;
-		entry["text"] = element.text;
-		entry["class"] = element.class_name;
-		entry["path"] = element.path;
-		entry["visible"] = element.visible;
-		entry["enabled"] = element.enabled;
-		entry["focused"] = element.focused;
-		entry["internal"] = element.internal;
-		entry["truncated"] = element.truncated;
-		Array bounds;
-		bounds.push_back(element.bounds.position.x);
-		bounds.push_back(element.bounds.position.y);
-		bounds.push_back(element.bounds.size.x);
-		bounds.push_back(element.bounds.size.y);
-		entry["bounds"] = bounds;
-		Array actions;
-		for (int i = 0; i < element.actions.size(); i++) {
-			actions.push_back(element.actions[i]);
-		}
-		entry["actions"] = actions;
-		entry["state"] = element.state;
-		entry["children"] = serialize_elements(element.children);
-		serialized.push_back(entry);
+		serialized.push_back(EditorSnapshot::serialize_element(element, true));
 	}
 	return serialized;
 }
 
 } // namespace
+
+Dictionary EditorSnapshot::serialize_element(const EditorElement &p_element, bool p_include_children) {
+	const EditorElement &element = p_element;
+	Dictionary entry;
+	entry["id"] = element.id;
+	entry["handle"] = element.handle;
+	entry["role"] = element.role;
+	entry["name"] = element.name;
+	entry["text"] = element.text;
+	entry["class"] = element.class_name;
+	entry["path"] = element.path;
+	entry["visible"] = element.visible;
+	entry["enabled"] = element.enabled;
+	entry["focused"] = element.focused;
+	entry["internal"] = element.internal;
+	entry["truncated"] = element.truncated;
+	Array bounds;
+	bounds.push_back(element.bounds.position.x);
+	bounds.push_back(element.bounds.position.y);
+	bounds.push_back(element.bounds.size.x);
+	bounds.push_back(element.bounds.size.y);
+	entry["bounds"] = bounds;
+	Array actions;
+	for (int i = 0; i < element.actions.size(); i++) {
+		actions.push_back(element.actions[i]);
+	}
+	entry["actions"] = actions;
+	entry["state"] = element.state;
+	entry["children"] = p_include_children ? serialize_elements(element.children) : Array();
+	return entry;
+}
 
 PackedStringArray EditorSnapshot::role_vocabulary() {
 	PackedStringArray roles;

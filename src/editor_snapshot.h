@@ -32,6 +32,9 @@ public:
 			const EditorSnapshotOptions &p_options, EditorSnapshotData &r_data);
 
 	static Dictionary serialize(const EditorSnapshotData &p_data);
+	// Serializes one element. Callers that publish a match list omit the subtree so a single page can
+	// never carry the whole tree; the field itself is always present so the advertised shape holds.
+	static Dictionary serialize_element(const EditorElement &p_element, bool p_include_children);
 };
 
 } // namespace godot

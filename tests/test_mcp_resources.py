@@ -43,10 +43,28 @@ class BaristaMCPResourceTests(unittest.TestCase):
             listed = client.rpc("resources/list", {})["result"]
             resources = listed["resources"]
             self.assertNotIn("nextCursor", listed)
-            self.assertIn("barista://project/info", [entry["uri"] for entry in resources])
+            self.assertEqual(
+                [entry["uri"] for entry in resources],
+                [
+                    "barista://project/info",
+                    "barista://ui/tree",
+                    "barista://editor/state",
+                    "barista://scene/active",
+                    "barista://scene/tree",
+                ],
+            )
 
-            templates = client.rpc("resources/templates/list", {})["result"]
-            self.assertEqual(templates, {"resourceTemplates": []})
+            templates = client.rpc("resources/templates/list", {})["result"]["resourceTemplates"]
+            self.assertEqual(
+                [entry["uriTemplate"] for entry in templates],
+                ["barista://ui/element/{handle}", "barista://ui/subtree/{handle}"],
+            )
+            for entry in templates:
+                with self.subTest(template=entry["uriTemplate"]):
+                    self.assertNotIn("uri", entry)
+                    for field in ("uriTemplate", "name", "title", "description", "mimeType"):
+                        self.assertIsInstance(entry[field], str, entry)
+                    self.assertEqual(entry["mimeType"], "application/json")
 
             # Vocabulary closure: every advertised resource must be readable and self-describing.
             for entry in resources:
@@ -95,6 +113,19 @@ class BaristaMCPResourceTests(unittest.TestCase):
                 "barista://project/info/",
                 "barista://PROJECT/INFO",
                 "barista://ui/element/1",
+                "barista://ui/element/",
+                "barista://ui/element/el:",
+                "barista://ui/element/el:abc",
+                "barista://ui/element/el:1/extra",
+                "barista://ui/element/el%3A1%2Fextra",
+                "barista://ui/element/%2e%2e%2fproject%2finfo",
+                "barista://ui/element/el:-1",
+                "barista://ui/element/EL:1",
+                "barista://ui/element/el:" + "9" * 32,
+                "barista://ui/subtree/",
+                "barista://ui/subtree/1",
+                "barista://ui/tree/",
+                "barista://scene/tree/1",
                 "file:///etc/passwd",
                 "",
             ):
@@ -138,7 +169,13 @@ class BaristaMCPResourceTests(unittest.TestCase):
             tools = client.rpc("tools/list", {})["result"]["tools"]
             self.assertEqual(
                 [tool["name"] for tool in tools],
-                ["barista_status", "get_project_info", "inspect_editor_ui"],
+                [
+                    "barista_status",
+                    "get_project_info",
+                    "find_editor_ui",
+                    "read_editor_state",
+                    "inspect_editor_ui",
+                ],
             )
             for tool in tools:
                 with self.subTest(tool=tool["name"]):
@@ -168,6 +205,75 @@ class BaristaMCPResourceTests(unittest.TestCase):
             unknown = client.rpc("tools/call", {"name": "resources/read", "arguments": {}})["result"]
             self.assertIs(unknown["isError"], True)
             self.assertEqual(unknown["structuredContent"]["error"], "unknown_tool")
+        finally:
+            editor.stop()
+
+    def test_handle_templates_resolve_only_issued_handles(self) -> None:
+        editor = EditorProcess()
+        try:
+            editor.start()
+            client = MCPClient(editor.wait_for_discovery())
+            client.initialize()
+
+            found = client.structured_tool(
+                "find_editor_ui", {"selector": {"role": "button", "name": "Brew"}}
+            )
+            self.assertTrue(found["ok"], found)
+            handle = found["matches"][0]["handle"]
+
+            element = client.rpc("resources/read", {"uri": f"barista://ui/element/{handle}"})
+            payload = json.loads(element["result"]["contents"][0]["text"])
+            self.assertEqual(payload["element"]["handle"], handle)
+            self.assertEqual(payload["element"]["text"], "Brew")
+            # The element route never carries a subtree; the subtree route does.
+            self.assertEqual(payload["element"]["children"], [])
+
+            fixture = client.structured_tool(
+                "find_editor_ui",
+                {"selector": {"role": "control", "name": "Barista Test Fixture"}},
+            )
+            fixture_handle = fixture["matches"][0]["handle"]
+            subtree = client.rpc(
+                "resources/read", {"uri": f"barista://ui/subtree/{fixture_handle}"}
+            )
+            subtree_payload = json.loads(subtree["result"]["contents"][0]["text"])
+            self.assertTrue(subtree_payload["element"]["children"])
+
+            # A percent-encoded handle names the same element; decoding never widens the grammar.
+            encoded = handle.replace(":", "%3A")
+            self.assertNotEqual(encoded, handle)
+            encoded_read = client.rpc("resources/read", {"uri": f"barista://ui/element/{encoded}"})
+            encoded_payload = json.loads(encoded_read["result"]["contents"][0]["text"])
+            self.assertEqual(encoded_payload["element"]["handle"], handle)
+
+            # A well-formed handle Barista never issued fails closed as stale, not as another element.
+            for uri in (
+                "barista://ui/element/el:999999999999",
+                "barista://ui/subtree/el:999999999999",
+            ):
+                with self.subTest(uri=uri):
+                    response = client.rpc("resources/read", {"uri": uri})
+                    self.assertNotIn("result", response, response)
+                    self.assertEqual(response["error"]["code"], INVALID_PARAMS)
+                    self.assertEqual(response["error"]["data"]["error"], "stale_handle")
+                    self.assertEqual(response["error"]["data"]["uri"], uri)
+        finally:
+            editor.stop()
+
+    def test_ui_tree_resource_matches_the_snapshot_tool(self) -> None:
+        editor = EditorProcess()
+        try:
+            editor.start()
+            client = MCPClient(editor.wait_for_discovery())
+            client.initialize()
+
+            read = client.rpc("resources/read", {"uri": "barista://ui/tree"})
+            payload = json.loads(read["result"]["contents"][0]["text"])
+            snapshot = client.structured_tool("inspect_editor_ui", {})
+            # Both routes call the same capture, so only the monotonic generation may differ.
+            self.assertEqual(sorted(payload), sorted(snapshot))
+            self.assertEqual(payload["limits"], snapshot["limits"])
+            self.assertLess(payload["generation"], snapshot["generation"])
         finally:
             editor.stop()
 
@@ -207,6 +313,7 @@ class BaristaMCPResourceTests(unittest.TestCase):
             "ProjectSettings": ("get_setting", "globalize_path"),
             "Engine": ("get_version_info",),
             "EditorInterface": ("get_edited_scene_root", "is_playing_scene"),
+            "Marshalls": ("base64_to_utf8", "utf8_to_base64"),
             "JSON": ("stringify",),
         }
         for class_name, methods in required_methods.items():
