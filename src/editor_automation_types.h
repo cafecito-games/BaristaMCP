@@ -31,6 +31,9 @@ struct EditorSnapshotLimits {
 	// Serialized snapshots stay well beneath the resource budget and the transport response cap,
 	// which must hold both the structured payload and its text rendering.
 	static constexpr int MAX_PAYLOAD_BYTES = 256 * 1024;
+	// Nodes that produce no element still consume this budget, so traversal is bounded even through a
+	// deep chain of nodes that are neither controls nor windows.
+	static constexpr int MAX_TRAVERSAL_DEPTH = 256;
 	// Bounded strings keep a single pathological control from consuming the whole payload budget.
 	static constexpr int MAX_STRING_LENGTH = 200;
 	static constexpr int MAX_PATH_LENGTH = 512;
@@ -71,6 +74,7 @@ struct EditorSnapshotData {
 	int element_count = 0;
 	bool depth_truncated = false;
 	bool element_limit_reached = false;
+	bool traversal_limit_reached = false;
 	EditorSnapshotOptions requested_options;
 	EditorSnapshotOptions applied_options;
 	std::vector<EditorElement> roots;

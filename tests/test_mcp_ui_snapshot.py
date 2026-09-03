@@ -104,6 +104,13 @@ class BaristaMCPUISnapshotTests(unittest.TestCase):
         self.assertEqual(order["class"], "LineEdit")
         self.assertIn("set_text", order["actions"])
 
+        passcode = find_one([fixture], role="text_field", name="Passcode")
+        # A masked field must never disclose what the editor hides on screen.
+        self.assertEqual(passcode["text"], "")
+        self.assertIs(passcode["state"]["secret"], True)
+        self.assertEqual(passcode["state"]["text_length"], len("roasted-secret"))
+        self.assertNotIn("roasted-secret", json.dumps(snapshot))
+
         notes = find_one([fixture], role="text_area", name="Notes")
         self.assertEqual(notes["class"], "TextEdit")
 
@@ -149,6 +156,10 @@ class BaristaMCPUISnapshotTests(unittest.TestCase):
 
         snapshot = self.client.structured_tool("inspect_editor_ui", {"max_depth": 32})
         self.assertGreater(snapshot["element_count"], 1)
+        self.assertEqual(set(snapshot), set(output_schema["properties"]))
+        self.assertEqual(
+            set(snapshot["limits"]), set(output_schema["properties"]["limits"]["properties"])
+        )
         seen_roles = set()
         for element in walk(snapshot["tree"]):
             # The advertised element shape is recursive; children obey it at every level.
@@ -308,7 +319,7 @@ class BaristaMCPUISnapshotPortabilityTests(unittest.TestCase):
             "MenuButton": ("get_item_count",),
             "Slider": ("is_editable",),
             "SpinBox": ("is_editable",),
-            "LineEdit": ("get_text", "is_editable"),
+            "LineEdit": ("get_text", "is_editable", "is_secret"),
             "Node": ("get_child_count", "get_children", "get_name"),
             "Object": ("get_class", "get_instance_id", "is_class"),
             "OptionButton": ("get_selected",),
@@ -318,7 +329,7 @@ class BaristaMCPUISnapshotPortabilityTests(unittest.TestCase):
             "TabBar": ("get_current_tab", "get_tab_count"),
             "TabContainer": ("get_current_tab", "get_tab_count"),
             "TextEdit": ("get_text", "is_editable"),
-            "Window": ("get_position", "get_size", "get_title", "is_visible"),
+            "Window": ("get_position", "get_size", "get_title", "has_focus", "is_visible"),
         }
         for class_name, methods in required_methods.items():
             available = {method["name"] for method in classes[class_name].get("methods", [])}

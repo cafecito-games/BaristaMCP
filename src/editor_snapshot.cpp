@@ -144,7 +144,11 @@ PackedStringArray actions_for(const String &p_role, bool p_enabled, bool p_focus
 String display_text(Control *p_control, const String &p_role) {
 	if (p_role == "text_field") {
 		LineEdit *line_edit = Object::cast_to<LineEdit>(p_control);
-		return line_edit != nullptr ? line_edit->get_text() : String();
+		if (line_edit == nullptr) {
+			return String();
+		}
+		// A secret field is masked on screen; a snapshot must not disclose what the editor hides.
+		return line_edit->is_secret() ? String() : line_edit->get_text();
 	}
 	if (p_role == "text_area" || p_role == "code_editor") {
 		TextEdit *text_edit = Object::cast_to<TextEdit>(p_control);
@@ -193,6 +197,7 @@ Dictionary control_state(Control *p_control, const String &p_role) {
 	LineEdit *line_edit = Object::cast_to<LineEdit>(p_control);
 	if (line_edit != nullptr && p_role == "text_field") {
 		state["editable"] = line_edit->is_editable();
+		state["secret"] = line_edit->is_secret();
 		state["text_length"] = line_edit->get_text().length();
 	}
 	TextEdit *text_edit = Object::cast_to<TextEdit>(p_control);
@@ -281,9 +286,16 @@ public:
 
 	// Collects the emitted descendants of p_parent. Nodes that are neither controls nor windows are
 	// transparent: their children are collected at the same depth so no public control is lost.
-	void collect_children(Node *p_parent, int p_depth, std::vector<EditorElement> &r_children, const String &p_path,
-			bool p_inherited_internal, bool &r_truncated) {
+	void collect_children(Node *p_parent, int p_depth, int p_node_depth, std::vector<EditorElement> &r_children,
+			const String &p_path, bool p_inherited_internal, bool &r_truncated) {
 		if (p_parent == nullptr) {
+			return;
+		}
+		// Nodes that emit no element still consume traversal budget, so an unusually deep chain of
+		// plain nodes cannot recurse without bound.
+		if (p_node_depth >= EditorSnapshotLimits::MAX_TRAVERSAL_DEPTH) {
+			data.traversal_limit_reached = true;
+			r_truncated = true;
 			return;
 		}
 		std::unordered_set<uint64_t> public_children;
@@ -310,7 +322,7 @@ public:
 			const bool is_internal = p_inherited_internal ||
 					(options.include_internal &&
 							public_children.find((uint64_t)child->get_instance_id()) == public_children.end());
-			add_node(child, p_depth, r_children, p_path, is_internal, r_truncated);
+			add_node(child, p_depth, p_node_depth, r_children, p_path, is_internal, r_truncated);
 			if (data.element_limit_reached) {
 				r_truncated = true;
 				return;
@@ -318,12 +330,12 @@ public:
 		}
 	}
 
-	void add_node(Node *p_node, int p_depth, std::vector<EditorElement> &r_children, const String &p_path,
-			bool p_internal, bool &r_truncated) {
+	void add_node(Node *p_node, int p_depth, int p_node_depth, std::vector<EditorElement> &r_children,
+			const String &p_path, bool p_internal, bool &r_truncated) {
 		Control *control = Object::cast_to<Control>(p_node);
 		Window *window = Object::cast_to<Window>(p_node);
 		if (control == nullptr && window == nullptr) {
-			collect_children(p_node, p_depth, r_children, p_path, p_internal, r_truncated);
+			collect_children(p_node, p_depth, p_node_depth + 1, r_children, p_path, p_internal, r_truncated);
 			return;
 		}
 		if (control != nullptr && !control->is_visible_in_tree()) {
@@ -378,6 +390,8 @@ public:
 			element.name = bounded(name, EditorSnapshotLimits::MAX_STRING_LENGTH);
 			element.text = bounded(window->get_title(), EditorSnapshotLimits::MAX_STRING_LENGTH);
 			element.visible = true;
+			element.enabled = true;
+			element.focused = window->has_focus();
 			element.bounds = Rect2(window->get_position(), window->get_size());
 			element.state = window_state(window);
 		}
@@ -394,7 +408,8 @@ public:
 			}
 		} else {
 			bool child_truncated = false;
-			collect_children(p_node, p_depth + 1, element.children, element.path, p_internal, child_truncated);
+			collect_children(
+					p_node, p_depth + 1, p_node_depth + 1, element.children, element.path, p_internal, child_truncated);
 			element.truncated = child_truncated;
 		}
 		r_children.push_back(element);
@@ -480,7 +495,7 @@ bool EditorSnapshot::capture(EditorInterface *p_editor_interface, uint64_t p_gen
 	bool truncated = false;
 	std::vector<EditorElement> roots;
 	// The base control is the single snapshot root, so every element hangs off one stable public node.
-	builder.add_node(base_control, 0, roots, String(), false, truncated);
+	builder.add_node(base_control, 0, 0, roots, String(), false, truncated);
 	r_data.roots = roots;
 	return true;
 }
@@ -493,13 +508,14 @@ Dictionary EditorSnapshot::serialize(const EditorSnapshotData &p_data) {
 	limits["include_internal"] = p_data.requested_options.include_internal;
 	limits["depth_truncated"] = p_data.depth_truncated;
 	limits["element_limit_reached"] = p_data.element_limit_reached;
+	limits["traversal_limit_reached"] = p_data.traversal_limit_reached;
 	limits["payload_limit_bytes"] = EditorSnapshotLimits::MAX_PAYLOAD_BYTES;
 
 	Dictionary snapshot;
 	snapshot["generation"] = (int64_t)p_data.generation;
 	snapshot["focused_element_id"] = p_data.focused_element_id;
 	snapshot["element_count"] = p_data.element_count;
-	snapshot["truncated"] = p_data.depth_truncated || p_data.element_limit_reached;
+	snapshot["truncated"] = p_data.depth_truncated || p_data.element_limit_reached || p_data.traversal_limit_reached;
 	snapshot["limits"] = limits;
 	snapshot["tree"] = serialize_elements(p_data.roots);
 	return snapshot;

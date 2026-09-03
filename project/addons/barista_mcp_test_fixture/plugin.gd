@@ -61,6 +61,12 @@ func _enter_tree() -> void:
 	order.placeholder_text = "Order"
 	column.add_child(order)
 
+	var passcode := LineEdit.new()
+	passcode.name = "Passcode"
+	passcode.secret = true
+	passcode.text = "roasted-secret"
+	column.add_child(passcode)
+
 	var notes := TextEdit.new()
 	notes.name = "Notes"
 	notes.custom_minimum_size = Vector2(0, 60)

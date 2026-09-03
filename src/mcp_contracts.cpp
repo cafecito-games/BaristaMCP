@@ -87,6 +87,8 @@ Dictionary ui_snapshot_output_schema() {
 			limits, "depth_truncated", MCPSchema::boolean("Whether any subtree was cut by max_depth."), true);
 	MCPSchema::add_property(limits, "element_limit_reached",
 			MCPSchema::boolean("Whether the element budget stopped the traversal."), true);
+	MCPSchema::add_property(limits, "traversal_limit_reached",
+			MCPSchema::boolean("Whether the absolute node-traversal depth stopped the traversal."), true);
 	MCPSchema::add_property(
 			limits, "payload_limit_bytes", MCPSchema::integer("Serialized payload budget in bytes."), true);
 
