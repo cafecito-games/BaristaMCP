@@ -183,15 +183,27 @@ bool EditorAutomationService::_resolve_handle(const String &p_handle, const Edit
 	// out before it runs.
 	const IssuedHandle previous = issued->second;
 
+	// Neither capture is a superset of the other: internal elements can crowd public ones out of the
+	// element budget, so a handle is looked for in the public capture first and then, only if it was
+	// not found, in the capture that also carries internal elements. Both are bounded.
 	Dictionary payload;
 	String capture_error;
 	String capture_message;
-	if (!_capture(p_options, r_data, payload, capture_error, capture_message)) {
-		r_error = capture_error;
-		r_message = capture_message;
-		return false;
+	const EditorElement *element = nullptr;
+	EditorSnapshotOptions options = p_options;
+	options.include_internal = false;
+	for (int attempt = 0; attempt < 2 && element == nullptr; attempt++) {
+		options.include_internal = attempt == 1;
+		if (!p_options.include_internal && options.include_internal) {
+			break;
+		}
+		if (!_capture(options, r_data, payload, capture_error, capture_message)) {
+			r_error = capture_error;
+			r_message = capture_message;
+			return false;
+		}
+		element = find_by_handle(r_data.roots, p_handle);
 	}
-	const EditorElement *element = find_by_handle(r_data.roots, p_handle);
 	if (element == nullptr) {
 		r_error = "stale_handle";
 		r_message = "Handle '" + p_handle + "' no longer resolves to a captured element.";

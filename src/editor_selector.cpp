@@ -374,16 +374,20 @@ EditorSelector::Status EditorSelector::match(const EditorSnapshotData &p_data, c
 	r_visit_limit_reached = false;
 
 	// A pinned element id names the capture it came from. Resolving it against any other capture would
-	// silently answer about a different element, so it fails closed instead.
-	if (p_query.has_id) {
-		if (!p_query.id.begins_with("s")) {
+	// silently answer about a different element, so it fails closed instead. Nesting is bounded by
+	// MAX_NESTING_DEPTH at parse time, so checking every id the query names is bounded too.
+	for (const EditorSelectorQuery *query = &p_query; query != nullptr; query = query->within.get()) {
+		if (!query->has_id) {
+			continue;
+		}
+		if (!query->id.begins_with("s")) {
 			return Status::STALE_HANDLE;
 		}
-		const int separator = p_query.id.find(":");
+		const int separator = query->id.find(":");
 		if (separator < 2) {
 			return Status::STALE_HANDLE;
 		}
-		const String generation_text = p_query.id.substr(1, separator - 1);
+		const String generation_text = query->id.substr(1, separator - 1);
 		if (!generation_text.is_valid_int() || (uint64_t)generation_text.to_int() != p_data.generation) {
 			return Status::STALE_HANDLE;
 		}

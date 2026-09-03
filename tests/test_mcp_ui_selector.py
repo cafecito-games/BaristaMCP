@@ -234,6 +234,10 @@ class BaristaMCPSelectorTests(unittest.TestCase):
             with self.subTest(element_id=malformed_id):
                 self.assertEqual(self.find(selector={"id": malformed_id})["status"], "stale_handle")
 
+        # A stale id nested in "within" is stale too, not an ordinary field mismatch.
+        nested = self.find(selector={"role": "button", "within": {"id": element_id}})
+        self.assertEqual(nested["status"], "stale_handle", nested)
+
     def test_handles_nested_in_within_are_validated(self) -> None:
         issued = self.find(selector={"role": "button", "name": "Brew"})["matches"][0]["handle"]
 
