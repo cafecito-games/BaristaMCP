@@ -342,6 +342,36 @@ class BaristaMCPAcceptanceTests(unittest.TestCase):
         finally:
             editor.stop()
 
+    def test_json_rpc_batches_and_integer_ids(self) -> None:
+        editor = EditorProcess()
+        try:
+            editor.start()
+            client = MCPClient(editor.wait_for_discovery())
+            status, body = client.request(
+                [
+                    {"jsonrpc": "2.0", "id": 42, "method": "ping", "params": {}},
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/initialized",
+                        "params": {},
+                    },
+                ]
+            )
+            self.assertEqual(status, 200)
+            responses = json.loads(body)
+            self.assertIsInstance(responses, list)
+            self.assertEqual(len(responses), 1)
+            self.assertIsInstance(responses[0]["id"], int)
+            self.assertEqual(responses[0]["id"], 42)
+            self.assertEqual(responses[0]["result"], {})
+
+            status, body = client.request(
+                [{"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}]
+            )
+            self.assertEqual((status, body), (202, ""))
+        finally:
+            editor.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

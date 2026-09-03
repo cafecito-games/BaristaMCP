@@ -129,6 +129,37 @@ MCPServer::HTTPResponse MCPServer::_process_json(const String &p_body) {
 	}
 
 	const Variant data = json->get_data();
+	if (data.get_type() == Variant::ARRAY) {
+		const Array batch = data;
+		if (batch.is_empty()) {
+			HTTPResponse response;
+			response.body = JSON::stringify(
+					_json_rpc_error(MCPDispatcher::INVALID_REQUEST, "A JSON-RPC batch must not be empty."), "", false);
+			return response;
+		}
+
+		Array responses;
+		for (int i = 0; i < batch.size(); i++) {
+			if (batch[i].get_type() != Variant::DICTIONARY) {
+				responses.push_back(_json_rpc_error(MCPDispatcher::INVALID_REQUEST, "Batch entries must be objects."));
+				continue;
+			}
+			bool has_response = false;
+			const Dictionary response = dispatcher.handle_message(batch[i], has_response);
+			if (has_response) {
+				responses.push_back(response);
+			}
+		}
+		if (responses.is_empty()) {
+			HTTPResponse response;
+			response.status = 202;
+			response.reason = "Accepted";
+			return response;
+		}
+		HTTPResponse response;
+		response.body = JSON::stringify(responses, "", false);
+		return response;
+	}
 	if (data.get_type() != Variant::DICTIONARY) {
 		HTTPResponse response;
 		response.body = JSON::stringify(
