@@ -182,7 +182,12 @@ Dictionary EditorEventLog::poll(bool p_has_marker, int64_t p_marker, int p_limit
 }
 
 void EditorEventLog::clear() {
+	// Indices are monotonic for the life of one server session, and clearing is what ends one. A
+	// plugin can leave and re-enter the editor tree without being destroyed, so the index stream is
+	// reset here as well: a new session that started above 1 would report a marker it never issued as
+	// expired instead of serving its own first page.
 	events.clear();
+	next_index = 1;
 	dropped = 0;
 }
 
