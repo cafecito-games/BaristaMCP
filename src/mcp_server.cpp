@@ -198,16 +198,30 @@ bool MCPServer::_is_local_origin(const String &p_origin) {
 	if (slash >= 0) {
 		authority = authority.substr(0, slash);
 	}
+	if (authority.is_empty() || authority.find("@") >= 0) {
+		return false;
+	}
 	String host = authority;
 	if (host.begins_with("[")) {
 		const int close = host.find("]");
 		if (close < 0) {
 			return false;
 		}
+		const String suffix = host.substr(close + 1);
+		if (!suffix.is_empty() &&
+				(!suffix.begins_with(":") || !suffix.substr(1).is_valid_int() || suffix.substr(1).to_int() < 0 ||
+						suffix.substr(1).to_int() > 65535)) {
+			return false;
+		}
 		host = host.substr(1, close - 1);
 	} else {
 		const int colon = host.find(":");
 		if (colon >= 0) {
+			const String port_text = host.substr(colon + 1);
+			if (port_text.is_empty() || !port_text.is_valid_int() || port_text.to_int() < 0 ||
+					port_text.to_int() > 65535 || port_text.find(":") >= 0) {
+				return false;
+			}
 			host = host.substr(0, colon);
 		}
 	}
@@ -338,6 +352,11 @@ void MCPServer::poll() {
 		HTTPRequest headers;
 		if (!_parse_headers(headers)) {
 			_send_error(400, "Bad Request", "bad_request");
+			return;
+		}
+		if (headers.method != "POST" || headers.path != "/mcp") {
+			content_length = 0;
+			_finish_request();
 			return;
 		}
 		const Variant raw_content_length = headers.headers.get("content-length", Variant());

@@ -39,17 +39,9 @@ Dictionary MCPDispatcher::handle_message(const Dictionary &p_message, bool &r_ha
 
 	if (!p_message.has("jsonrpc") || p_message.get("jsonrpc", Variant()).get_type() != Variant::STRING ||
 			String(p_message.get("jsonrpc", Variant())) != "2.0") {
-		if (notification) {
-			r_has_response = false;
-			return Dictionary();
-		}
 		return _make_error(id, INVALID_REQUEST, "Request must use JSON-RPC 2.0.");
 	}
 	if (!p_message.has("method") || p_message.get("method", Variant()).get_type() != Variant::STRING) {
-		if (notification) {
-			r_has_response = false;
-			return Dictionary();
-		}
 		return _make_error(id, INVALID_REQUEST, "Request is missing a string 'method'.");
 	}
 

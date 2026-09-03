@@ -258,6 +258,13 @@ class BaristaMCPAcceptanceTests(unittest.TestCase):
                 {**authorized, "Origin": "https://attacker.example"},
             )
             self.assertEqual(status, 403)
+            status, _ = client.raw_request(
+                "POST",
+                client.path,
+                ping,
+                {**authorized, "Origin": "https://[::1].attacker.example"},
+            )
+            self.assertEqual(status, 403)
 
             status, body = client.raw_request("POST", client.path, "{", authorized)
             self.assertEqual(status, 200)
@@ -279,6 +286,8 @@ class BaristaMCPAcceptanceTests(unittest.TestCase):
                 b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 9000000\r\n\r\n"
             )
             self.assertEqual(status, 413)
+            status, _ = client.raw_socket_request(b"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            self.assertEqual(status, 405)
         finally:
             editor.stop()
 
@@ -369,6 +378,12 @@ class BaristaMCPAcceptanceTests(unittest.TestCase):
                 [{"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}]
             )
             self.assertEqual((status, body), (202, ""))
+
+            status, body = client.request({"jsonrpc": "2.0"})
+            self.assertEqual(status, 200)
+            invalid = json.loads(body)
+            self.assertIsNone(invalid["id"])
+            self.assertEqual(invalid["error"]["code"], -32600)
         finally:
             editor.stop()
 
