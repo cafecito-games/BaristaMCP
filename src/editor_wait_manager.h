@@ -77,7 +77,14 @@ struct EditorWaitContext {
 	// evaluation interval had elapsed.
 	bool has_snapshot = false;
 	const EditorSnapshotData *snapshot = nullptr;
+	// This server's own identity for the element that owns the keyboard. It is never published as
+	// such: a wait names the focus owner only when the issued-handle registry already knows it.
 	String focused_handle;
+	// False when the capture was cut short of the focus owner, so which element holds the keyboard is
+	// unknown rather than known to be nothing.
+	bool focus_resolved = true;
+	// True when the focus owner's handle is one Barista issued, and so one a client may name.
+	bool focused_handle_issued = false;
 	bool filesystem_available = false;
 	bool filesystem_busy = false;
 	bool is_playing = false;

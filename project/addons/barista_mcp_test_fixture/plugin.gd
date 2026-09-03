@@ -30,12 +30,29 @@ const DIALOG_NAME := "Fixture Dialog"
 const DIALOG_TOGGLE_NAME := "Dialog Visible"
 const DIALOG_FIELD_A := "Dialog Field A"
 const DIALOG_FIELD_B := "Dialog Field B"
+## Fills the embedded window with more controls than a capture can hold, ahead of its two fields, so
+## the window is still captured while the element that owns the keyboard inside it is not. It is the
+## shape that separates "the capture reached the focus owner" from "the capture reached its window".
+const DIALOG_FILLER_NAME := "Dialog Filler"
+const DIALOG_FILLER_CHILDREN := 2400
+## A second embedded window that can never take window focus, holding one focusable field. A control
+## keeps its own viewport's focus owner regardless of which window is focused, so this field reports
+## focus while owning no keyboard, and a focus verdict that descends into it is wrong.
+const GHOST_DIALOG_NAME := "Fixture Ghost Dialog"
+const GHOST_TOGGLE_NAME := "Ghost Visible"
+const GHOST_FIELD_NAME := "Ghost Field"
+## Moves focus onto the internal-only field without any request ever naming it, so the element that
+## owns the keyboard has no handle Barista ever issued.
+const INTERNAL_FOCUS_NAME := "Focus Internal"
 ## Length cap published by the "Ticket" field, so a test can request text the field can never hold.
 const TICKET_MAX_LENGTH := 8
 
 var _panel: PanelContainer = null
 var _counters: Label = null
 var _dialog: Window = null
+var _dialog_filler: Node = null
+var _ghost_dialog: Window = null
+var _internal_only: LineEdit = null
 ## Counts the editor signals the signalling actions are expected to raise, published as label text so
 ## an acceptance test observes an action through a fresh snapshot rather than through the tool's own
 ## report of itself. Text actions raise no signal that a control method and an input event share, so
@@ -255,15 +272,39 @@ func _enter_tree() -> void:
 
 	## A real control reachable only through a capture that includes internal children. Nothing about
 	## it is hidden from the editor: it is simply outside the default capture domain.
-	var internal_only := LineEdit.new()
-	internal_only.name = INTERNAL_ONLY_NAME
-	internal_only.set_accessibility_name(INTERNAL_ONLY_NAME)
-	column.add_child(internal_only, false, Node.INTERNAL_MODE_BACK)
+	_internal_only = LineEdit.new()
+	_internal_only.name = INTERNAL_ONLY_NAME
+	_internal_only.set_accessibility_name(INTERNAL_ONLY_NAME)
+	column.add_child(_internal_only, false, Node.INTERNAL_MODE_BACK)
+
+	## Fills the embedded window on demand, so a capture that was complete when a wait started can be
+	## cut short while that same wait is still pending.
+	var filler_toggle := CheckBox.new()
+	filler_toggle.name = DIALOG_FILLER_NAME
+	filler_toggle.set_accessibility_name(DIALOG_FILLER_NAME)
+	filler_toggle.toggled.connect(_set_dialog_filler)
+	column.add_child(filler_toggle)
+
+	## Shows and hides the window that can never take focus.
+	var ghost_toggle := CheckBox.new()
+	ghost_toggle.name = GHOST_TOGGLE_NAME
+	ghost_toggle.set_accessibility_name(GHOST_TOGGLE_NAME)
+	ghost_toggle.toggled.connect(_set_ghost_visible)
+	column.add_child(ghost_toggle)
+
+	## Focuses the internal-only field from inside the editor, so no request ever names the element
+	## that ends up owning the keyboard.
+	var internal_focus := CheckBox.new()
+	internal_focus.name = INTERNAL_FOCUS_NAME
+	internal_focus.set_accessibility_name(INTERNAL_FOCUS_NAME)
+	internal_focus.toggled.connect(_focus_internal_only)
+	column.add_child(internal_focus)
 
 	_add_wide_internal_subtree()
 
 	base_control.add_child(_panel)
 	_add_dialog(base_control)
+	_add_ghost_dialog(base_control)
 
 
 ## Builds a large internal subtree of plain nodes: many parents, each holding a wide child list.
@@ -311,9 +352,63 @@ func _add_dialog(base_control: Control) -> void:
 	base_control.add_child(_dialog)
 
 
+## Builds a window that can never take window focus, placed ahead of the fixture panel so a walk that
+## does not skip unfocused window subtrees reaches its field before any control of the main window.
+func _add_ghost_dialog(base_control: Control) -> void:
+	_ghost_dialog = Window.new()
+	_ghost_dialog.name = GHOST_DIALOG_NAME
+	_ghost_dialog.title = GHOST_DIALOG_NAME
+	_ghost_dialog.unfocusable = true
+	_ghost_dialog.position = Vector2i(400, 200)
+	_ghost_dialog.size = Vector2i(240, 80)
+	var ghost_field := LineEdit.new()
+	ghost_field.name = GHOST_FIELD_NAME
+	ghost_field.set_accessibility_name(GHOST_FIELD_NAME)
+	_ghost_dialog.add_child(ghost_field)
+	_ghost_dialog.hide()
+	base_control.add_child(_ghost_dialog)
+	base_control.move_child(_ghost_dialog, 0)
+
+
 func _set_dialog_visible(visible: bool) -> void:
 	if _dialog != null and is_instance_valid(_dialog):
 		_dialog.visible = visible
+
+
+func _set_ghost_visible(visible: bool) -> void:
+	if _ghost_dialog != null and is_instance_valid(_ghost_dialog):
+		_ghost_dialog.visible = visible
+
+
+## Adds or removes the controls that crowd the embedded window's own fields out of a capture. They
+## are inserted ahead of the fields, so a capture that runs out of budget inside this window has
+## reached the window itself and none of the elements that can hold focus in it.
+func _set_dialog_filler(enabled: bool) -> void:
+	if _dialog == null or not is_instance_valid(_dialog):
+		return
+	if not enabled:
+		if _dialog_filler != null and is_instance_valid(_dialog_filler):
+			_dialog.remove_child(_dialog_filler)
+			_dialog_filler.queue_free()
+		_dialog_filler = null
+		return
+	if _dialog_filler != null and is_instance_valid(_dialog_filler):
+		return
+	_dialog_filler = Control.new()
+	_dialog_filler.name = "Dialog Filler Root"
+	for index in DIALOG_FILLER_CHILDREN:
+		var filler := Control.new()
+		filler.name = "Dialog Filler %d" % index
+		_dialog_filler.add_child(filler)
+	_dialog.add_child(_dialog_filler)
+	_dialog.move_child(_dialog_filler, 0)
+
+
+func _focus_internal_only(pressed: bool) -> void:
+	if not pressed:
+		return
+	if _internal_only != null and is_instance_valid(_internal_only):
+		_internal_only.grab_focus()
 
 
 func _bump(counter: String) -> void:
@@ -331,6 +426,14 @@ func _publish_counts() -> void:
 
 
 func _exit_tree() -> void:
+	_internal_only = null
+	_dialog_filler = null
+	if _ghost_dialog != null:
+		if is_instance_valid(_ghost_dialog):
+			if _ghost_dialog.get_parent() != null:
+				_ghost_dialog.get_parent().remove_child(_ghost_dialog)
+			_ghost_dialog.queue_free()
+		_ghost_dialog = null
 	if _dialog != null:
 		if is_instance_valid(_dialog):
 			if _dialog.get_parent() != null:

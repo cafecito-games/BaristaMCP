@@ -42,6 +42,10 @@ INTERNAL_ONLY_NAME = "Internal Only Field"
 DIALOG_TOGGLE_NAME = "Dialog Visible"
 DIALOG_FIELD_A = "Dialog Field A"
 DIALOG_FIELD_B = "Dialog Field B"
+DIALOG_FILLER_NAME = "Dialog Filler"
+GHOST_TOGGLE_NAME = "Ghost Visible"
+GHOST_FIELD_NAME = "Ghost Field"
+INTERNAL_FOCUS_NAME = "Focus Internal"
 
 # One definition of the wait status vocabulary, mirrored from EditorWaitManager::status_vocabulary in
 # src/editor_wait_manager.cpp. Every consumer below must handle or reject every value.
@@ -813,6 +817,145 @@ class BaristaMCPActionTraceTests(WaitClientMixin, unittest.TestCase):
         finally:
             self.drain(started["wait_id"])
             self.act(selector=within_fixture(name="Order"), action="set_text", text="")
+
+
+class BaristaMCPFocusEvidenceTests(WaitClientMixin, unittest.TestCase):
+    """A focus verdict is only ever read from a capture that could prove it.
+
+    The three cases below share one editor session and run in name order. The first depends on that
+    order: it observes a focus owner no request has ever named, which is only possible while no
+    request has yet captured internal children. The last one crowds the embedded window past the
+    element budget and never undoes it, so it must stay the final case in this session.
+    """
+
+    editor: EditorProcess
+    client: MCPClient
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.editor = EditorProcess(extra_args=("--", AUTOMATION_ARGUMENT))
+        try:
+            cls.editor.start()
+            cls.client = MCPClient(cls.editor.wait_for_discovery())
+            cls.client.initialize()
+        except BaseException:
+            cls.editor.stop()
+            raise
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.editor.stop()
+
+    def act(self, **arguments: Any) -> dict[str, Any]:
+        return self.client.structured_tool(ACT_TOOL, arguments)
+
+    def test_a_focus_wait_never_publishes_a_handle_barista_never_issued(self) -> None:
+        """The focus owner is reachable only through a capture that includes internal children.
+
+        The wait context always captures that wider domain
+        (src/editor_automation_service.cpp EditorAutomationService::_build_wait_context), while a
+        request capture registers handles only for what its own options reached
+        (src/editor_automation_service.cpp EditorAutomationService::_register_handles). A handle the
+        registry never issued is refused by every other tool, so a wait must not publish one.
+        """
+        focused = self.act(
+            selector=within_fixture(name=INTERNAL_FOCUS_NAME), action="set_checked", checked=True
+        )
+        self.assertIs(focused["ok"], True, focused)
+        try:
+            started = self.wait(condition={"type": "focus_changed"}, timeout_ms=1000)
+            self.assertEqual(started["status"], "pending", started)
+            self.assertIs(started["detail"]["focused_handle_issued"], False, started)
+            self.assertEqual(started["detail"]["focused_handle"], "", started)
+            self.drain(started["wait_id"])
+
+            # Once a request has named the element over the domain that reaches it, the same wait
+            # publishes exactly the handle that request issued.
+            located = self.client.structured_tool(
+                FIND_TOOL,
+                {
+                    "selector": {"name": INTERNAL_ONLY_NAME},
+                    "include_internal": True,
+                    "require_unique": True,
+                },
+            )
+            self.assertIs(located["ok"], True, located)
+            issued_handle = located["matches"][0]["handle"]
+            second = self.wait(condition={"type": "focus_changed"}, timeout_ms=1000)
+            self.assertEqual(second["status"], "pending", second)
+            self.assertIs(second["detail"]["focused_handle_issued"], True, second)
+            self.assertEqual(second["detail"]["focused_handle"], issued_handle, second)
+            self.drain(second["wait_id"])
+        finally:
+            self.act(
+                selector=within_fixture(name=INTERNAL_FOCUS_NAME), action="set_checked", checked=False
+            )
+
+    def test_a_focus_wait_never_reports_a_control_of_an_unfocused_window(self) -> None:
+        """Every viewport keeps its own focus owner, so a control in a window that holds no window
+        focus owns no keyboard (src/editor_snapshot.cpp SnapshotBuilder::add_node reads
+        Control::has_focus, which is viewport-local). The fixture's ghost window can never take
+        window focus and is walked before the fixture panel, so a walk that descends into unfocused
+        window subtrees reports its field instead of the control that actually holds focus.
+        """
+        shown = self.act(
+            selector=within_fixture(name=GHOST_TOGGLE_NAME), action="set_checked", checked=True
+        )
+        self.assertIs(shown["ok"], True, shown)
+        try:
+            ghost = self.act(selector={"name": GHOST_FIELD_NAME}, action="focus")
+            self.assertIs(ghost["ok"], True, ghost)
+            anchored = self.act(selector=within_fixture(name="Order"), action="focus")
+            self.assertIs(anchored["ok"], True, anchored)
+
+            started = self.wait(condition={"type": "focus_changed"}, timeout_ms=1000)
+            self.assertEqual(started["status"], "pending", started)
+            try:
+                self.assertNotEqual(started["detail"]["focused_handle"], ghost["handle"], started)
+                self.assertEqual(started["detail"]["focused_handle"], anchored["handle"], started)
+            finally:
+                self.drain(started["wait_id"])
+        finally:
+            self.act(
+                selector=within_fixture(name=GHOST_TOGGLE_NAME), action="set_checked", checked=False
+            )
+
+    def test_a_truncated_capture_never_completes_a_focus_wait(self) -> None:
+        """Truncation that begins after the baseline must still refuse to answer.
+
+        The embedded window is crowded past the element budget while the wait is pending, so the
+        window that holds focus is still captured while the field inside it that owns the keyboard
+        is not (src/editor_snapshot.cpp SnapshotBuilder::add_node stops at
+        EditorSnapshotLimits::MAX_MAX_ELEMENTS). Focus never moves, so nothing may complete.
+        """
+        shown = self.act(
+            selector=within_fixture(name=DIALOG_TOGGLE_NAME), action="set_checked", checked=True
+        )
+        self.assertIs(shown["ok"], True, shown)
+        anchored = self.act(selector={"name": DIALOG_FIELD_A}, action="focus")
+        self.assertIs(anchored["ok"], True, anchored)
+
+        # The wait context captures the widest published domain, which reaches every element right
+        # now, so this wait is created against a complete baseline.
+        capture = self.client.structured_tool(
+            INSPECT_TOOL, {"max_depth": 32, "max_elements": 2000, "include_internal": True}
+        )
+        self.assertIs(capture["truncated"], False, capture["limits"])
+
+        started = self.wait(condition={"type": "focus_changed"}, timeout_ms=3000)
+        self.assertEqual(started["status"], "pending", started)
+        try:
+            crowded = self.act(
+                selector=within_fixture(name=DIALOG_FILLER_NAME), action="set_checked", checked=True
+            )
+            self.assertIs(crowded["ok"], True, crowded)
+            finished = self.poll_until_terminal(started["wait_id"], timeout=30.0)
+            self.assertEqual(finished["status"], "wait_timeout", finished)
+            self.assertIs(finished["detail"]["truncated"], True, finished)
+            self.assertIs(finished["detail"]["focus_resolved"], False, finished)
+            self.assertEqual(finished["detail"]["focused_handle"], "", finished)
+        finally:
+            self.drain(started["wait_id"])
 
 
 class BaristaMCPWaitTruncationTests(WaitClientMixin, unittest.TestCase):

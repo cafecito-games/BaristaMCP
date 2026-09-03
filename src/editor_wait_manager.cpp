@@ -463,15 +463,21 @@ bool EditorWaitManager::_evaluate(EditorWait &r_wait, const EditorWaitContext &p
 	r_wait.detail["truncated"] = truncated;
 
 	if (condition.type == CONDITION_FOCUS_CHANGED) {
-		r_wait.detail["focused_handle"] = p_context.focused_handle;
-		if (p_context.focused_handle == r_wait.baseline_focus_handle) {
+		// Only a handle Barista issued is ever named: every other tool refuses one it did not, so a
+		// focus owner the registry does not know is published as an absent handle rather than as a
+		// name no client could use.
+		r_wait.detail["focused_handle"] = p_context.focused_handle_issued ? p_context.focused_handle : String();
+		r_wait.detail["focused_handle_issued"] = p_context.focused_handle_issued;
+		r_wait.detail["focus_resolved"] = p_context.focus_resolved;
+		// A capture that was cut short can neither show that focus moved nor that it did not: the
+		// element that holds the keyboard may simply be one the walk never reached, and the window
+		// that contains it is never read as a stand-in for it. Truncation is judged on every tick and
+		// not only at creation, because a capture that was complete when the baseline was taken can
+		// be cut short by a later frame.
+		if (!p_context.focus_resolved || truncated) {
 			return false;
 		}
-		// Focus arriving at an element this capture actually reached is positive evidence, and a
-		// bounded walk cannot falsify it. Focus reading as "nothing" is a different claim: a capture
-		// that was cut short may simply have omitted the element that still holds focus, so absence
-		// of focus is only ever reported from a capture that was not truncated.
-		return !p_context.focused_handle.is_empty() || !truncated;
+		return p_context.focused_handle != r_wait.baseline_focus_handle;
 	}
 	if (condition.selector == nullptr) {
 		return false;
@@ -559,9 +565,10 @@ Dictionary EditorWaitManager::start(
 	}
 	// A focus wait is judged against the focus this capture saw. A capture that was cut short may
 	// have omitted the element that holds focus, so it cannot establish a baseline and the wait is
-	// refused rather than parked on a baseline that was never true.
+	// refused rather than parked on a baseline that was never true. Every later tick applies the same
+	// rule in _evaluate; this only keeps a wait from ever being created against an unprovable one.
 	if (condition_type == CONDITION_FOCUS_CHANGED && p_context.snapshot != nullptr &&
-			snapshot_truncated(*p_context.snapshot)) {
+			(!p_context.focus_resolved || snapshot_truncated(*p_context.snapshot))) {
 		return _payload(nullptr, Status::UNSUPPORTED_CAPABILITY,
 				"The editor UI capture was truncated, so the element holding focus cannot be established as a "
 				"baseline.",
