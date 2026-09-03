@@ -22,12 +22,17 @@ class EditorToolProvider {
 	int port = 0;
 
 	static Dictionary _tool_result(const Dictionary &p_structured, bool p_is_error);
-	Dictionary _status(bool p_initialized) const;
-	Dictionary _project_info() const;
+	static Dictionary _tool_error(const String &p_error, const String &p_message);
 
 public:
 	void configure(EditorInterface *p_editor_interface, const String &p_endpoint, int p_port);
 	Dictionary call(const String &p_name, const Dictionary &p_arguments, bool p_initialized) const;
+
+	Dictionary status(bool p_initialized) const;
+	Dictionary project_info() const;
+	// Fills r_payload with the structured content of an advertised resource. Returns false for any URI
+	// the provider does not serve, so unknown URIs can never be mapped onto another resource.
+	bool read_resource(const String &p_uri, Dictionary &r_payload) const;
 };
 
 } // namespace godot

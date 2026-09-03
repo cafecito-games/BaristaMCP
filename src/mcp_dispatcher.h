@@ -27,7 +27,9 @@ class MCPDispatcher {
 	LifecycleState lifecycle_state = UNINITIALIZED;
 	EditorToolProvider tool_provider;
 
-	static Dictionary _make_error(const Variant &p_id, int p_code, const String &p_message);
+	static Dictionary _make_error(
+			const Variant &p_id, int p_code, const String &p_message, const Dictionary &p_data = Dictionary());
+	static bool _validate_params(const Dictionary &p_message, const Dictionary &p_schema, String &r_error);
 	static Dictionary _make_result(const Variant &p_id, const Variant &p_result);
 
 public:
@@ -37,6 +39,7 @@ public:
 		METHOD_NOT_FOUND = -32601,
 		INVALID_PARAMS = -32602,
 		SERVER_NOT_INITIALIZED = -32002,
+		RESOURCE_TOO_LARGE = -32003,
 	};
 
 	Dictionary handle_message(const Dictionary &p_message, bool &r_has_response);
