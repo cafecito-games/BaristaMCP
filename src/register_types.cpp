@@ -1,3 +1,11 @@
+/**************************************************************************/
+/*  register_types.cpp                                                    */
+/*                                                                        */
+/*  Copyright (c) 2026-present Cafecito Games LLC.                        */
+/*  This file is part of BaristaMCP, a Godot GDExtension.                 */
+/*  SPDX-License-Identifier: MIT                                          */
+/**************************************************************************/
+
 #include "register_types.h"
 
 #include "barista_mcp_plugin.h"
