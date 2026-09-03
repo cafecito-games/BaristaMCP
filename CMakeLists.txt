@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.17)
 set(LIBNAME "barista_mcp")
 set(GODOT_PROJECT_DIR "project" CACHE STRING "Godot project directory")
 set(GODOTCPP_API_VERSION "4.7" CACHE STRING "Godot API version")
+set(GODOTCPP_BUILD_PROFILE "${CMAKE_CURRENT_LIST_DIR}/build_profile.json" CACHE FILEPATH "godot-cpp build profile")
 
 find_package(Python3 3.8 REQUIRED)
 find_program(GIT git REQUIRED)
@@ -32,7 +33,6 @@ get_target_property(GODOTCPP_PLATFORM godot::cpp GODOTCPP_PLATFORM)
 set_target_properties(${LIBNAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<1:${PROJECT_SOURCE_DIR}/bin/${GODOTCPP_PLATFORM}>"
     LIBRARY_OUTPUT_DIRECTORY "$<1:${PROJECT_SOURCE_DIR}/bin/${GODOTCPP_PLATFORM}>"
-    PREFIX "lib"
     OUTPUT_NAME "${LIBNAME}${GODOTCPP_SUFFIX}"
 )
 

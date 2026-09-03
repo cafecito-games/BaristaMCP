@@ -6,9 +6,15 @@ reloadable = false
 
 [libraries]
 
-macos.debug = "./macos/libbarista_mcp.macos.template_debug.arm64.dylib"
-macos.release = "./macos/libbarista_mcp.macos.template_release.arm64.dylib"
+macos.debug.arm64 = "./macos/libbarista_mcp.macos.template_debug.arm64.dylib"
+macos.release.arm64 = "./macos/libbarista_mcp.macos.template_release.arm64.dylib"
+macos.debug.x86_64 = "./macos/libbarista_mcp.macos.template_debug.x86_64.dylib"
+macos.release.x86_64 = "./macos/libbarista_mcp.macos.template_release.x86_64.dylib"
+macos.debug = "./macos/libbarista_mcp.macos.template_debug.dylib"
+macos.release = "./macos/libbarista_mcp.macos.template_release.dylib"
 windows.debug.x86_64 = "./windows/barista_mcp.windows.template_debug.x86_64.dll"
 windows.release.x86_64 = "./windows/barista_mcp.windows.template_release.x86_64.dll"
 linux.debug.x86_64 = "./linux/libbarista_mcp.linux.template_debug.x86_64.so"
 linux.release.x86_64 = "./linux/libbarista_mcp.linux.template_release.x86_64.so"
+linux.debug.arm64 = "./linux/libbarista_mcp.linux.template_debug.arm64.so"
+linux.release.arm64 = "./linux/libbarista_mcp.linux.template_release.arm64.so"
