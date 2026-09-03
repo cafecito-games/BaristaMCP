@@ -1,2 +1,38 @@
 .worktrees/
 docs/superpowers/
+
+# Godot-generated files.
+.godot/
+project/.godot/
+
+# SCons and generated bindings.
+.sconsign*.dblite
+custom.py
+compile_commands.json
+src/gen/
+
+# Native build output (keep extension manifests).
+/bin/
+project/bin/*/
+*.o
+*.os
+*.so
+*.dylib
+*.dll
+*.obj
+*.bc
+*.pyc
+*.pdb
+*.lib
+*.exp
+
+# CMake and IDE state.
+cmake-build*/
+CMakeUserPresets.json
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Platform metadata and logs.
+.DS_Store
+*.log

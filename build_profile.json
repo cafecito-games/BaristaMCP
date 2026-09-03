@@ -1,0 +1,15 @@
+{
+  "enabled_classes": [
+    "Crypto",
+    "EditorInterface",
+    "EditorPlugin",
+    "Engine",
+    "JSON",
+    "Marshalls",
+    "OS",
+    "ProjectSettings",
+    "StreamPeerTCP",
+    "TCPServer",
+    "Time"
+  ]
+}

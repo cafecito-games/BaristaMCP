@@ -1,0 +1,71 @@
+name: Continuous Integration
+
+on:
+  push:
+  pull_request:
+  merge_group:
+  workflow_call:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            arch: x86_64
+            os: ubuntu-22.04
+            target: template_debug
+          - platform: windows
+            arch: x86_64
+            os: windows-latest
+            target: template_debug
+          - platform: macos
+            arch: universal
+            os: macos-latest
+            target: template_debug
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up godot-cpp dependencies
+        uses: ./godot-cpp/.github/actions/setup-godot-cpp
+        with:
+          platform: ${{ matrix.platform }}
+
+      - name: Restore SCons cache
+        uses: ./godot-cpp/.github/actions/godot-cache-restore
+        with:
+          scons-cache: ${{ github.workspace }}/.scons-cache/
+          cache-name: barista_${{ matrix.platform }}_${{ matrix.arch }}_${{ matrix.target }}
+
+      - name: Build BaristaMCP
+        shell: sh
+        env:
+          SCONS_CACHE: ${{ github.workspace }}/.scons-cache/
+        run: scons target=${{ matrix.target }} platform=${{ matrix.platform }} arch=${{ matrix.arch }}
+
+      - name: Download Godot 4.7.2
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          curl -fsSLo godot.zip https://github.com/godotengine/godot/releases/download/4.7.2-stable/Godot_v4.7.2-stable_linux.x86_64.zip
+          unzip -q godot.zip -d godot-bin
+          chmod +x godot-bin/Godot_v4.7.2-stable_linux.x86_64
+
+      - name: Run MCP acceptance tests
+        if: matrix.platform == 'linux'
+        shell: bash
+        env:
+          GODOT_BIN: ${{ github.workspace }}/godot-bin/Godot_v4.7.2-stable_linux.x86_64
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Save SCons cache
+        uses: ./godot-cpp/.github/actions/godot-cache-save
+        with:
+          scons-cache: ${{ github.workspace }}/.scons-cache/
+          cache-name: barista_${{ matrix.platform }}_${{ matrix.arch }}_${{ matrix.target }}

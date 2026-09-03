@@ -1,0 +1,89 @@
+name: Build release package
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            arch: x86_64
+            os: ubuntu-22.04
+            target: template_debug
+          - platform: linux
+            arch: x86_64
+            os: ubuntu-22.04
+            target: template_release
+          - platform: windows
+            arch: x86_64
+            os: windows-latest
+            target: template_debug
+          - platform: windows
+            arch: x86_64
+            os: windows-latest
+            target: template_release
+          - platform: macos
+            arch: universal
+            os: macos-latest
+            target: template_debug
+          - platform: macos
+            arch: universal
+            os: macos-latest
+            target: template_release
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up godot-cpp dependencies
+        uses: ./godot-cpp/.github/actions/setup-godot-cpp
+        with:
+          platform: ${{ matrix.platform }}
+
+      - name: Build
+        shell: sh
+        run: scons target=${{ matrix.target }} platform=${{ matrix.platform }} arch=${{ matrix.arch }}
+
+      - name: Upload platform library
+        uses: actions/upload-artifact@v4
+        with:
+          name: barista-mcp-${{ matrix.platform }}-${{ matrix.arch }}-${{ matrix.target }}
+          path: |
+            project/bin/${{ matrix.platform }}/**
+            project/bin/*.gdextension*
+          if-no-files-found: error
+
+  package:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout addon metadata
+        uses: actions/checkout@v4
+
+      - name: Download platform libraries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: barista-mcp-*
+          path: package/project/bin
+          merge-multiple: true
+
+      - name: Assemble addon
+        shell: bash
+        run: |
+          mkdir -p package/project/addons
+          cp -R project/addons/barista_mcp package/project/addons/
+          cp project/bin/barista_mcp.gdextension package/project/bin/
+          cp project/bin/barista_mcp.gdextension.uid package/project/bin/
+          cp LICENSE.md README.md THIRD_PARTY_NOTICES.md package/
+
+      - name: Upload BaristaMCP package
+        uses: actions/upload-artifact@v4
+        with:
+          name: BaristaMCP
+          path: package/**
