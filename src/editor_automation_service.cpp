@@ -479,6 +479,18 @@ Dictionary EditorAutomationService::find_ui(const Dictionary &p_arguments, Strin
 			cached_snapshot.generation, total, offset, limit, truncated, next_cursor, matches);
 }
 
+namespace {
+
+// The comparable form of one element: everything it publishes except the element id, which is scoped
+// to the capture that produced it and would otherwise report every surviving element as changed.
+String comparable_element(const EditorElement &p_element) {
+	Dictionary serialized = EditorSnapshot::serialize_element(p_element, false);
+	serialized.erase("id");
+	return JSON::stringify(serialized, "", false);
+}
+
+} // namespace
+
 bool EditorAutomationService::_resolve_target(const Dictionary &p_arguments, const EditorActionRequest &p_request,
 		EditorSnapshotData &r_data, const EditorElement **r_element, Dictionary &r_failure, String &r_error,
 		String &r_message) {
@@ -524,12 +536,15 @@ bool EditorAutomationService::_resolve_target(const Dictionary &p_arguments, con
 	if (!_capture(parse_options(p_arguments), r_data, payload, r_error, r_message)) {
 		return false;
 	}
+	// Every failure discovered from here on was decided against this capture, so it names it.
+	const int64_t decided_generation = (int64_t)r_data.generation;
 
 	for (int i = 0; i < query_handles.size(); i++) {
 		const EditorElement *resolved = find_by_handle(r_data.roots, query_handles[i]);
 		if (resolved != nullptr && resolved->class_name != previous_classes[(size_t)i]) {
 			r_failure = EditorActionDriver::failure(EditorActionDriver::Status::STALE_HANDLE,
 					"Handle '" + query_handles[i] + "' now refers to a different object type.", p_request.action);
+			r_failure["generation"] = decided_generation;
 			return false;
 		}
 	}
@@ -545,11 +560,13 @@ bool EditorAutomationService::_resolve_target(const Dictionary &p_arguments, con
 				r_failure = EditorActionDriver::failure(EditorActionDriver::Status::STALE_HANDLE,
 						"Handle '" + query_handles[i] + "' no longer resolves to a captured element.",
 						p_request.action);
+				r_failure["generation"] = decided_generation;
 				return false;
 			}
 		}
 		r_failure = EditorActionDriver::failure(
 				EditorActionDriver::Status::NO_MATCH, "No element matched the selector.", p_request.action);
+		r_failure["generation"] = decided_generation;
 		return false;
 	}
 	// A truncated walk, or a capture that omitted elements before matching began, only ever counts a
@@ -563,11 +580,13 @@ bool EditorAutomationService::_resolve_target(const Dictionary &p_arguments, con
 				: "The capture was truncated, so the selector cannot be shown to name exactly one element.";
 		r_failure =
 				EditorActionDriver::failure(EditorActionDriver::Status::AMBIGUOUS_SELECTOR, reason, p_request.action);
+		r_failure["generation"] = decided_generation;
 		return false;
 	}
 	if (page.empty()) {
 		r_failure = EditorActionDriver::failure(
 				EditorActionDriver::Status::NO_MATCH, "No element matched the selector.", p_request.action);
+		r_failure["generation"] = decided_generation;
 		return false;
 	}
 	*r_element = page[0];
@@ -613,7 +632,7 @@ Dictionary EditorAutomationService::act_ui(const Dictionary &p_arguments, String
 	}
 
 	const String handle = element->handle;
-	const String before_element = JSON::stringify(EditorSnapshot::serialize_element(*element, false), "", false);
+	const String before_element = comparable_element(*element);
 
 	EditorActionDriver::Route route = EditorActionDriver::Route::NONE;
 	EditorActionDriver::Status status = EditorActionDriver::Status::OK;
@@ -642,11 +661,9 @@ Dictionary EditorAutomationService::act_ui(const Dictionary &p_arguments, String
 	// "changed" is only ever what Barista can verify: whether the acted element's own published fields
 	// differ between the capture the action was decided on and the capture taken after it. An action
 	// whose effect lands elsewhere in the editor reports false rather than claiming a change.
-	Dictionary after_serialized;
 	if (after_element != nullptr) {
-		after_serialized = EditorSnapshot::serialize_element(*after_element, false);
-		payload["changed"] = JSON::stringify(after_serialized, "", false) != before_element;
-		payload["element"] = after_serialized;
+		payload["changed"] = comparable_element(*after_element) != before_element;
+		payload["element"] = EditorSnapshot::serialize_element(*after_element, false);
 	} else {
 		payload["changed"] = true;
 	}

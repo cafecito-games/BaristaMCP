@@ -81,37 +81,25 @@ bool action_requires(const ActionArguments &p_entry, const String &p_argument) {
 	return false;
 }
 
-// Pushes one already-built event through the control's own viewport, which is the documented public
-// input route. Returns false when the control is not inside a viewport.
-bool push_event(Control *p_control, const Ref<InputEvent> &p_event) {
-	Viewport *viewport = p_control->get_viewport();
-	if (viewport == nullptr) {
-		return false;
-	}
-	viewport->push_input(p_event, true);
-	return true;
-}
-
 // Moves the pointer over the element and reports whether the element, or one of its descendants, is
 // what the editor would actually deliver a click to. A click that would land on another control is
 // refused rather than mutating the wrong element.
-bool hover_reaches(Control *p_control, const Vector2 &p_point) {
+bool hover_reaches(Viewport *p_viewport, Control *p_control, const Vector2 &p_point) {
 	Ref<InputEventMouseMotion> motion;
 	motion.instantiate();
 	motion->set_position(p_point);
 	motion->set_global_position(p_point);
-	if (!push_event(p_control, motion)) {
-		return false;
-	}
-	Viewport *viewport = p_control->get_viewport();
-	Control *hovered = viewport->gui_get_hovered_control();
+	p_viewport->push_input(motion, true);
+	Control *hovered = p_viewport->gui_get_hovered_control();
 	if (hovered == nullptr) {
 		return false;
 	}
 	return hovered == p_control || p_control->is_ancestor_of(hovered);
 }
 
-bool push_click(Control *p_control, const Vector2 &p_point) {
+// Every input route resolves its viewport once, before the first event is pushed, so a multi-event
+// action can never fail part way through and leave the editor half mutated.
+void push_click(Viewport *p_viewport, const Vector2 &p_point) {
 	for (int press = 1; press >= 0; press--) {
 		Ref<InputEventMouseButton> event;
 		event.instantiate();
@@ -120,25 +108,19 @@ bool push_click(Control *p_control, const Vector2 &p_point) {
 		event->set_pressed(press == 1);
 		event->set_position(p_point);
 		event->set_global_position(p_point);
-		if (!push_event(p_control, event)) {
-			return false;
-		}
+		p_viewport->push_input(event, true);
 	}
-	return true;
 }
 
-bool push_key(Control *p_control, Key p_keycode, char32_t p_unicode) {
+void push_key(Viewport *p_viewport, Key p_keycode, char32_t p_unicode) {
 	for (int press = 1; press >= 0; press--) {
 		Ref<InputEventKey> event;
 		event.instantiate();
 		event->set_pressed(press == 1);
 		event->set_keycode(p_keycode);
 		event->set_unicode(p_unicode);
-		if (!push_event(p_control, event)) {
-			return false;
-		}
+		p_viewport->push_input(event, true);
 	}
-	return true;
 }
 
 } // namespace
@@ -361,17 +343,19 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 			r_message = "The element has no on-screen area to click.";
 			return false;
 		}
-		const Vector2 point = rect.get_center();
-		if (!hover_reaches(p_control, point)) {
-			r_status = Status::ELEMENT_NOT_INTERACTABLE;
-			r_message = "The element does not receive pointer input at its own center.";
-			return false;
-		}
-		if (!push_click(p_control, point)) {
+		Viewport *viewport = p_control->get_viewport();
+		if (viewport == nullptr) {
 			r_status = Status::ELEMENT_NOT_INTERACTABLE;
 			r_message = "The element is not inside a viewport that accepts input.";
 			return false;
 		}
+		const Vector2 point = rect.get_center();
+		if (!hover_reaches(viewport, p_control, point)) {
+			r_status = Status::ELEMENT_NOT_INTERACTABLE;
+			r_message = "The element does not receive pointer input at its own center.";
+			return false;
+		}
+		push_click(viewport, point);
 		r_route = Route::INPUT_EVENT;
 		return true;
 	}
@@ -412,6 +396,12 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 			r_message = "The element cannot take keyboard focus.";
 			return false;
 		}
+		Viewport *viewport = p_control->get_viewport();
+		if (viewport == nullptr) {
+			r_status = Status::ELEMENT_NOT_INTERACTABLE;
+			r_message = "The element is not inside a viewport that accepts input.";
+			return false;
+		}
 		p_control->grab_focus();
 		if (!p_control->has_focus()) {
 			r_status = Status::ELEMENT_NOT_INTERACTABLE;
@@ -419,22 +409,14 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 			return false;
 		}
 		if (action == ACTION_SUBMIT) {
-			if (!push_key(p_control, KEY_ENTER, 0)) {
-				r_status = Status::ELEMENT_NOT_INTERACTABLE;
-				r_message = "The element is not inside a viewport that accepts input.";
-				return false;
-			}
+			push_key(viewport, KEY_ENTER, 0);
 			r_route = Route::INPUT_EVENT;
 			return true;
 		}
 		// The character count was charged against MAX_TYPED_LENGTH before this ran, so the event loop
 		// below is bounded by an already-validated argument.
 		for (int i = 0; i < p_request.text.length(); i++) {
-			if (!push_key(p_control, KEY_NONE, p_request.text[i])) {
-				r_status = Status::ELEMENT_NOT_INTERACTABLE;
-				r_message = "The element is not inside a viewport that accepts input.";
-				return false;
-			}
+			push_key(viewport, KEY_NONE, p_request.text[i]);
 		}
 		r_route = Route::INPUT_EVENT;
 		return true;
@@ -474,8 +456,6 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 	if (action == ACTION_SELECT_ITEM) {
 		ItemList *item_list = Object::cast_to<ItemList>(p_control);
 		if (item_list == nullptr) {
-			// Tree selection has no bounded public route that does not walk TreeItem objects, so it is
-			// omitted from this build rather than approximated.
 			r_status = Status::UNSUPPORTED_ACTION;
 			r_message = "Class '" + p_element.class_name + "' has no public item-selection route.";
 			return false;

@@ -267,6 +267,8 @@ class BaristaMCPActionTests(unittest.TestCase):
         self.assertIs(self.client.structured_tool("barista_status", {})["automation_enabled"], True)
 
     def test_focus_uses_the_control_method_route(self) -> None:
+        # Focus somewhere else first, so this test never depends on where focus already was.
+        self.act(selector=within_fixture(name="Notes"), action="focus")
         result = self.act(selector=within_fixture(name="Order"), action="focus")
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["status"], "ok")
@@ -306,6 +308,12 @@ class BaristaMCPActionTests(unittest.TestCase):
         area = self.act(selector=within_fixture(name="Notes"), action="set_text", text="pour over")
         self.assertTrue(area["ok"], area)
         self.assertEqual(area["element"]["text"], "pour over")
+
+        # "changed" reports what Barista can verify, so writing the same text again is not a change.
+        # Element identity that is scoped to a capture must never leak into that verdict.
+        repeated = self.act(selector=within_fixture(name="Notes"), action="set_text", text="pour over")
+        self.assertTrue(repeated["ok"], repeated)
+        self.assertIs(repeated["changed"], False)
 
     def test_click_uses_the_public_input_route(self) -> None:
         before = self.counters()
@@ -361,6 +369,12 @@ class BaristaMCPActionTests(unittest.TestCase):
                 self.assertEqual(result["route"], "none")
                 self.assertIs(result["changed"], False)
                 self.assertNotIn("element", result)
+                # A failure decided after a capture names the capture it was decided against; one
+                # refused before any capture names none.
+                if status in ("no_match", "ambiguous_selector"):
+                    self.assertGreater(result["generation"], 0, result)
+                else:
+                    self.assertEqual(result["generation"], 0, result)
         # A truncated capture cannot show a selector names exactly one element, so it never acts.
         truncated = self.act(
             selector=within_fixture(role="button", name="Brew"), action="click", max_depth=8
@@ -379,8 +393,10 @@ class BaristaMCPActionTests(unittest.TestCase):
         label = self.act(selector={"name": COUNTERS_NAME}, action="focus")
         self.assertEqual(label["status"], "unsupported_action")
 
-        # A Tree advertises select_item, but this build has no bounded public route for it and says so
-        # rather than approximating one.
+        # A Tree does not advertise select_item, because this build has no bounded public route for it:
+        # an element never advertises a capability the driver would deterministically refuse.
+        tree_element = find_one(self.client, within_fixture(name="Roasts"))
+        self.assertNotIn("select_item", tree_element["actions"])
         tree = self.act(selector=within_fixture(name="Roasts"), action="select_item", index=0)
         self.assertEqual(tree["status"], "unsupported_action")
 

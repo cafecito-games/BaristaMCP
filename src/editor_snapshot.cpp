@@ -93,7 +93,9 @@ const ActionRule ACTION_RULES[] = {
 		{"spin_box", {"focus", "set_value", nullptr, nullptr, nullptr}},
 		{"slider", {"focus", "set_value", nullptr, nullptr, nullptr}},
 		{"list", {"focus", "select_item", nullptr, nullptr, nullptr}},
-		{"tree", {"focus", "select_item", nullptr, nullptr, nullptr}},
+		// Tree item selection has no bounded public route that does not walk TreeItem objects, so a Tree
+		// advertises only what a client can actually invoke.
+		{"tree", {"focus", nullptr, nullptr, nullptr, nullptr}},
 		{"tab_container", {"focus", "select_tab", nullptr, nullptr, nullptr}},
 		{"tab_bar", {"focus", "select_tab", nullptr, nullptr, nullptr}},
 		{"scroll_container", {"scroll", nullptr, nullptr, nullptr, nullptr}},
