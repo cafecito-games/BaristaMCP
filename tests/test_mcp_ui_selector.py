@@ -265,6 +265,22 @@ class BaristaMCPSelectorTests(unittest.TestCase):
         retired = self.find(selector=selector, cursor=cursor)
         self.assertEqual(retired["status"], "invalid_cursor")
 
+    def test_cursor_identity_survives_selector_field_injection(self) -> None:
+        """A field value can never impersonate the separators of the canonical selector form."""
+        paged = {"role": "button", "visible": True}
+        # Serialized naively, this single value produces the same text as the two fields above.
+        colliding = {"role": "button;visible=1"}
+        first = self.find(selector=paged, limit=1)
+        self.assertTrue(first["ok"], first)
+        self.assertGreater(first["match_count"], 1)
+        cursor = first["next_cursor"]
+        self.assertTrue(cursor)
+
+        reused = self.find(selector=colliding, cursor=cursor)
+        self.assertFalse(reused["ok"], reused)
+        self.assertEqual(reused["status"], "invalid_cursor")
+        self.assertEqual(reused["matches"], [])
+
     def test_every_status_is_reachable_and_handled(self) -> None:
         """Vocabulary closure: every advertised status is produced by a real request."""
         observed = {

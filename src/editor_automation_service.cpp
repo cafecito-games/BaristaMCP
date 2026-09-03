@@ -325,6 +325,25 @@ Dictionary EditorAutomationService::find_ui(const Dictionary &p_arguments, Strin
 		resume = true;
 	}
 
+	// The registry is consulted before this request captures anything. Capturing first would register
+	// every live handle, so a handle Barista had never issued would be admitted by the very request
+	// that supplied it, and the class recorded for a reused instance id would be overwritten before it
+	// could be compared.
+	String previous_class;
+	if (query.has_handle) {
+		uint64_t instance_id = 0;
+		if (!parse_handle(query.handle, instance_id)) {
+			return find_failure(EditorSelector::Status::STALE_HANDLE,
+					"Handle '" + query.handle + "' was not issued by Barista.", limit);
+		}
+		const auto issued = issued_handles.find(instance_id);
+		if (issued == issued_handles.end()) {
+			return find_failure(EditorSelector::Status::STALE_HANDLE,
+					"Handle '" + query.handle + "' was not issued by Barista.", limit);
+		}
+		previous_class = issued->second.class_name;
+	}
+
 	if (!resume) {
 		EditorSnapshotData data;
 		Dictionary payload;
@@ -333,14 +352,6 @@ Dictionary EditorAutomationService::find_ui(const Dictionary &p_arguments, Strin
 		}
 		cached_snapshot = data;
 		has_cached_snapshot = true;
-	}
-
-	if (query.has_handle) {
-		uint64_t instance_id = 0;
-		if (!parse_handle(query.handle, instance_id) || issued_handles.find(instance_id) == issued_handles.end()) {
-			return find_failure(EditorSelector::Status::STALE_HANDLE,
-					"Handle '" + query.handle + "' was not issued by Barista.", limit);
-		}
 	}
 
 	std::vector<const EditorElement *> page;
@@ -354,17 +365,28 @@ Dictionary EditorAutomationService::find_ui(const Dictionary &p_arguments, Strin
 	}
 	if (status == EditorSelector::Status::NO_MATCH) {
 		if (query.has_handle) {
-			return find_failure(EditorSelector::Status::STALE_HANDLE,
-					"Handle '" + query.handle + "' no longer resolves to a captured element.", limit);
+			return find_payload(false, EditorSelector::status_name(EditorSelector::Status::STALE_HANDLE),
+					"Handle '" + query.handle + "' no longer resolves to a captured element.",
+					cached_snapshot.generation, 0, offset, limit, visit_limit_reached, String(), Array());
 		}
 		return find_payload(false, EditorSelector::status_name(EditorSelector::Status::NO_MATCH),
 				"No element matched the selector.", cached_snapshot.generation, 0, offset, limit, visit_limit_reached,
 				String(), Array());
 	}
-	if (require_unique && total > 1) {
-		return find_payload(false, EditorSelector::status_name(EditorSelector::Status::AMBIGUOUS_SELECTOR),
-				"The selector matched " + String::num_int64(total) + " elements where exactly one is required.",
-				cached_snapshot.generation, total, offset, limit, false, String(), Array());
+	// A truncated walk only ever counts a lower bound, so uniqueness cannot be established from it.
+	if (require_unique && (total > 1 || visit_limit_reached)) {
+		const String reason = total > 1
+				? "The selector matched " + String::num_int64(total) + " elements where exactly one is required."
+				: "The match budget was exhausted, so the selector cannot be shown to match exactly one element.";
+		return find_payload(false, EditorSelector::status_name(EditorSelector::Status::AMBIGUOUS_SELECTOR), reason,
+				cached_snapshot.generation, total, offset, limit, visit_limit_reached, String(), Array());
+	}
+	// The capture above reissued this handle, so comparing against the class recorded before the
+	// capture is what detects an instance id that now belongs to a different object.
+	if (query.has_handle && !page.empty() && page[0]->class_name != previous_class) {
+		return find_payload(false, EditorSelector::status_name(EditorSelector::Status::STALE_HANDLE),
+				"Handle '" + query.handle + "' now refers to a different object type.", cached_snapshot.generation, 0,
+				offset, limit, visit_limit_reached, String(), Array());
 	}
 
 	Array matches;

@@ -133,43 +133,49 @@ bool parse_query(const Variant &p_selector, EditorSelectorQuery &r_query, int p_
 	return true;
 }
 
+// Length-framed so that no value can impersonate a field separator: "role=button;visible=1" as one
+// value and role plus visible as two fields must never serialize to the same canonical string.
+void append_field(String &r_canonical, const char *p_field, const String &p_value) {
+	r_canonical += String(p_field) + "=" + String::num_int64(p_value.length()) + ":" + p_value + ";";
+}
+
 void digest_into(const EditorSelectorQuery &p_query, String &r_canonical) {
 	r_canonical += "(";
 	if (p_query.has_id) {
-		r_canonical += String(FIELD_ID) + "=" + p_query.id + ";";
+		append_field(r_canonical, FIELD_ID, p_query.id);
 	}
 	if (p_query.has_handle) {
-		r_canonical += String(FIELD_HANDLE) + "=" + p_query.handle + ";";
+		append_field(r_canonical, FIELD_HANDLE, p_query.handle);
 	}
 	if (p_query.has_role) {
-		r_canonical += String(FIELD_ROLE) + "=" + p_query.role + ";";
+		append_field(r_canonical, FIELD_ROLE, p_query.role);
 	}
 	if (p_query.has_name) {
-		r_canonical += String(FIELD_NAME) + "=" + p_query.name + ";";
+		append_field(r_canonical, FIELD_NAME, p_query.name);
 	}
 	if (p_query.has_text) {
-		r_canonical += String(FIELD_TEXT) + "=" + p_query.text + ";";
+		append_field(r_canonical, FIELD_TEXT, p_query.text);
 	}
 	if (p_query.has_text_contains) {
-		r_canonical += String(FIELD_TEXT_CONTAINS) + "=" + p_query.text_contains + ";";
+		append_field(r_canonical, FIELD_TEXT_CONTAINS, p_query.text_contains);
 	}
 	if (p_query.has_class_name) {
-		r_canonical += String(FIELD_CLASS) + "=" + p_query.class_name + ";";
+		append_field(r_canonical, FIELD_CLASS, p_query.class_name);
 	}
 	if (p_query.has_visible) {
-		r_canonical += String(FIELD_VISIBLE) + "=" + (p_query.visible ? "1" : "0") + ";";
+		append_field(r_canonical, FIELD_VISIBLE, p_query.visible ? "1" : "0");
 	}
 	if (p_query.has_enabled) {
-		r_canonical += String(FIELD_ENABLED) + "=" + (p_query.enabled ? "1" : "0") + ";";
+		append_field(r_canonical, FIELD_ENABLED, p_query.enabled ? "1" : "0");
 	}
 	if (p_query.has_focused) {
-		r_canonical += String(FIELD_FOCUSED) + "=" + (p_query.focused ? "1" : "0") + ";";
+		append_field(r_canonical, FIELD_FOCUSED, p_query.focused ? "1" : "0");
 	}
 	if (p_query.has_pressed) {
-		r_canonical += String(FIELD_PRESSED) + "=" + (p_query.pressed ? "1" : "0") + ";";
+		append_field(r_canonical, FIELD_PRESSED, p_query.pressed ? "1" : "0");
 	}
 	if (p_query.has_selected) {
-		r_canonical += String(FIELD_SELECTED) + "=" + (p_query.selected ? "1" : "0") + ";";
+		append_field(r_canonical, FIELD_SELECTED, p_query.selected ? "1" : "0");
 	}
 	if (p_query.within) {
 		r_canonical += String(FIELD_WITHIN) + "=";
@@ -341,7 +347,9 @@ bool EditorSelector::parse(const Variant &p_selector, EditorSelectorQuery &r_que
 uint64_t EditorSelector::digest(const EditorSelectorQuery &p_query) {
 	String canonical;
 	digest_into(p_query, canonical);
-	return canonical.hash();
+	// The canonical form is injective, so folding its length into the hash keeps selectors of different
+	// shapes apart even where the 32-bit string hash would collide.
+	return ((uint64_t)(uint32_t)canonical.hash()) | ((uint64_t)(uint32_t)canonical.length() << 32);
 }
 
 EditorSelector::Status EditorSelector::match(const EditorSnapshotData &p_data, const EditorSelectorQuery &p_query,
@@ -412,6 +420,11 @@ bool EditorSelector::decode_cursor(const String &p_cursor, EditorSelectorCursor 
 		}
 	}
 	const String payload = Marshalls::get_singleton()->base64_to_utf8(p_cursor);
+	// A cursor has exactly one spelling. Requiring the round trip rejects every mutation that decodes
+	// to the same payload, such as trailing groups that add bytes past the encoded text.
+	if (Marshalls::get_singleton()->utf8_to_base64(payload) != p_cursor) {
+		return false;
+	}
 	const PackedStringArray fields = payload.split(CURSOR_SEPARATOR, true);
 	if (fields.size() != CURSOR_FIELD_COUNT || fields[0] != CURSOR_MAGIC) {
 		return false;

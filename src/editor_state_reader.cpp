@@ -34,6 +34,13 @@ String bounded(const String &p_value, int p_limit) {
 }
 
 // Publishes at most MAX_LIST_ITEMS entries and says so, rather than silently capping a list.
+//
+// The engine exposes open scenes, unsaved files, the selection, and open scripts only as whole
+// collections: EditorInterface::get_open_scenes, EditorInterface::get_unsaved_scenes,
+// EditorSelection::get_selected_nodes, and ScriptEditor::get_open_scripts have no indexed accessor in
+// the pinned public API, so the collection is built by the engine before Barista can bound it. The
+// cost is therefore proportional to editor state the user already created and is not amplifiable by
+// any client argument; everything Barista itself does with the collection is bounded here.
 Dictionary bounded_string_list(const PackedStringArray &p_values) {
 	Array items;
 	const int count = p_values.size();
