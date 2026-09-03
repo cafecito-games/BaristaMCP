@@ -42,13 +42,22 @@ void BaristaMCPPlugin::_define_project_settings() {
 
 void BaristaMCPPlugin::_start_server() {
 	ProjectSettings *settings = ProjectSettings::get_singleton();
-	if (!(bool)settings->get_setting(SETTING_ENABLED, true)) {
+	const Variant enabled_value = settings->get_setting(SETTING_ENABLED, true);
+	const Variant port_value = settings->get_setting(SETTING_PORT, 0);
+	const Variant request_timeout_value = settings->get_setting(SETTING_REQUEST_TIMEOUT_MS, 30000);
+	const Variant max_request_bytes_value = settings->get_setting(SETTING_MAX_REQUEST_BYTES, 8 * 1024 * 1024);
+	if (enabled_value.get_type() != Variant::BOOL || port_value.get_type() != Variant::INT ||
+			request_timeout_value.get_type() != Variant::INT || max_request_bytes_value.get_type() != Variant::INT) {
+		UtilityFunctions::printerr("BaristaMCP: invalid server project settings; refusing to start.");
+		return;
+	}
+	if (!(bool)enabled_value) {
 		return;
 	}
 
-	const int64_t port = settings->get_setting(SETTING_PORT, 0);
-	const int64_t request_timeout_ms = settings->get_setting(SETTING_REQUEST_TIMEOUT_MS, 30000);
-	const int64_t max_request_bytes = settings->get_setting(SETTING_MAX_REQUEST_BYTES, 8 * 1024 * 1024);
+	const int64_t port = port_value;
+	const int64_t request_timeout_ms = request_timeout_value;
+	const int64_t max_request_bytes = max_request_bytes_value;
 	if (port < 0 || port > 65535 || request_timeout_ms <= 0 || request_timeout_ms > 300000 ||
 			max_request_bytes < 1024 || max_request_bytes > 16 * 1024 * 1024) {
 		UtilityFunctions::printerr("BaristaMCP: invalid server project settings; refusing to start.");

@@ -8,6 +8,13 @@
 
 namespace godot {
 
+namespace {
+
+constexpr int MAX_RESPONSE_BODY_BYTES = 1024 * 1024;
+constexpr int RESPONSE_WRITE_CHUNK_BYTES = 64 * 1024;
+
+} // namespace
+
 MCPServer::MCPServer() {
 	listener.instantiate();
 }
@@ -57,9 +64,12 @@ void MCPServer::_accept_connection() {
 	}
 	connection = listener->take_connection();
 	request_buffer.clear();
+	response_buffer.clear();
 	header_end = -1;
 	content_length = -1;
+	response_offset = 0;
 	connection_started_ms = Time::get_singleton()->get_ticks_msec();
+	response_started_ms = 0;
 }
 
 void MCPServer::_reset_connection() {
@@ -68,9 +78,12 @@ void MCPServer::_reset_connection() {
 	}
 	connection.unref();
 	request_buffer.clear();
+	response_buffer.clear();
 	header_end = -1;
 	content_length = -1;
+	response_offset = 0;
 	connection_started_ms = 0;
+	response_started_ms = 0;
 }
 
 bool MCPServer::_parse_headers(HTTPRequest &r_request) {
@@ -266,15 +279,42 @@ void MCPServer::_send_response(const HTTPResponse &p_response) {
 	if (connection.is_null()) {
 		return;
 	}
-	const PackedByteArray body = p_response.body.to_utf8_buffer();
-	String response = "HTTP/1.1 " + String::num_int64(p_response.status) + " " + p_response.reason + "\r\n";
+	int status = p_response.status;
+	String reason = p_response.reason;
+	PackedByteArray body = p_response.body.to_utf8_buffer();
+	if (body.size() > MAX_RESPONSE_BODY_BYTES) {
+		status = 500;
+		reason = "Internal Server Error";
+		body = String("{\"error\":\"response_too_large\"}").to_utf8_buffer();
+	}
+	String response = "HTTP/1.1 " + String::num_int64(status) + " " + reason + "\r\n";
 	response += "Content-Type: application/json\r\n";
 	response += "Content-Length: " + String::num_int64(body.size()) + "\r\n";
 	response += "Connection: close\r\n\r\n";
-	PackedByteArray bytes = response.to_utf8_buffer();
-	bytes.append_array(body);
-	connection->put_data(bytes);
-	_reset_connection();
+	response_buffer = response.to_utf8_buffer();
+	response_buffer.append_array(body);
+	response_offset = 0;
+	response_started_ms = Time::get_singleton()->get_ticks_msec();
+	request_buffer.clear();
+	_flush_response();
+}
+
+void MCPServer::_flush_response() {
+	if (connection.is_null() || response_buffer.is_empty()) {
+		return;
+	}
+	const int remaining = response_buffer.size() - response_offset;
+	const int chunk_size = MIN(remaining, RESPONSE_WRITE_CHUNK_BYTES);
+	const PackedByteArray chunk = response_buffer.slice(response_offset, response_offset + chunk_size);
+	const Array sent = connection->put_partial_data(chunk);
+	if ((Error)(int64_t)sent[0] != OK) {
+		_reset_connection();
+		return;
+	}
+	response_offset += (int64_t)sent[1];
+	if (response_offset >= response_buffer.size()) {
+		_reset_connection();
+	}
 }
 
 void MCPServer::_send_error(int p_status, const String &p_reason, const String &p_code) {
@@ -293,7 +333,7 @@ void MCPServer::_finish_request() {
 	}
 	const int body_size = request_buffer.size() - header_end;
 	if (body_size > 0) {
-		request.body = request_buffer.slice(header_end, request_buffer.size()).get_string_from_utf8();
+		request.body = request_buffer.slice(header_end, header_end + content_length).get_string_from_utf8();
 	}
 	_send_response(_process_request(request));
 }
@@ -316,6 +356,14 @@ void MCPServer::poll() {
 		return;
 	}
 	if (status != StreamPeerSocket::STATUS_CONNECTED) {
+		return;
+	}
+	if (!response_buffer.is_empty()) {
+		if (Time::get_singleton()->get_ticks_msec() - response_started_ms > request_timeout_ms) {
+			_reset_connection();
+			return;
+		}
+		_flush_response();
 		return;
 	}
 	if (Time::get_singleton()->get_ticks_msec() - connection_started_ms > request_timeout_ms) {
@@ -357,6 +405,10 @@ void MCPServer::poll() {
 		if (headers.method != "POST" || headers.path != "/mcp") {
 			content_length = 0;
 			_finish_request();
+			return;
+		}
+		if (headers.headers.has("transfer-encoding")) {
+			_send_error(400, "Bad Request", "unsupported_transfer_encoding");
 			return;
 		}
 		const Variant raw_content_length = headers.headers.get("content-length", Variant());

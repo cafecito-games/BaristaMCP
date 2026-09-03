@@ -10,7 +10,13 @@
 namespace godot {
 
 class MCPDispatcher {
-	bool initialized = false;
+	enum LifecycleState {
+		UNINITIALIZED,
+		INITIALIZE_RESPONDED,
+		INITIALIZED,
+	};
+
+	LifecycleState lifecycle_state = UNINITIALIZED;
 	EditorToolProvider tool_provider;
 
 	static Dictionary _make_error(const Variant &p_id, int p_code, const String &p_message);
@@ -22,6 +28,7 @@ public:
 		INVALID_REQUEST = -32600,
 		METHOD_NOT_FOUND = -32601,
 		INVALID_PARAMS = -32602,
+		SERVER_NOT_INITIALIZED = -32002,
 	};
 
 	Dictionary handle_message(const Dictionary &p_message, bool &r_has_response);

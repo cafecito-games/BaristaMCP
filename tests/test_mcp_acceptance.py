@@ -7,6 +7,7 @@ import queue
 import re
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -20,7 +21,11 @@ DISCOVERY_PREFIX = "BARISTA_MCP "
 
 
 class EditorProcess:
-    def __init__(self) -> None:
+    def __init__(
+        self, project_dir: Path = PROJECT_DIR, extra_args: tuple[str, ...] = ()
+    ) -> None:
+        self.project_dir = project_dir
+        self.extra_args = extra_args
         self.lines: queue.Queue[str] = queue.Queue()
         self.output: list[str] = []
         self.process: subprocess.Popen[str] | None = None
@@ -39,7 +44,14 @@ class EditorProcess:
             raise AssertionError(f"GODOT_BIN must be Godot 4.7, got {version!r}")
 
         self.process = subprocess.Popen(
-            [godot_bin, "--headless", "--editor", "--path", str(PROJECT_DIR)],
+            [
+                godot_bin,
+                "--headless",
+                "--editor",
+                "--path",
+                str(self.project_dir),
+                *self.extra_args,
+            ],
             cwd=ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -71,6 +83,18 @@ class EditorProcess:
                 return json.loads(line[marker + len(DISCOVERY_PREFIX) :])
         joined = "".join(self.output)
         raise AssertionError(f"Timed out waiting for {DISCOVERY_PREFIX!r}.\nEditor output:\n{joined}")
+
+    def wait_for_output(self, expected: str, timeout: float = 8.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            assert self.process is not None
+            if expected in "".join(self.output):
+                return
+            if self.process.poll() is not None:
+                break
+            time.sleep(0.05)
+        joined = "".join(self.output)
+        raise AssertionError(f"Timed out waiting for {expected!r}.\nEditor output:\n{joined}")
 
     def stop(self) -> None:
         if self.process is None:
@@ -129,7 +153,7 @@ class MCPClient:
             },
         )
 
-    def rpc(self, method: str, params: dict[str, object]) -> dict[str, object]:
+    def rpc(self, method: str, params: object) -> dict[str, object]:
         request_id = self.next_id
         self.next_id += 1
         status, body = self.request(
@@ -142,10 +166,13 @@ class MCPClient:
             raise AssertionError(f"Mismatched JSON-RPC id: {response!r}")
         return response
 
-    def raw_socket_request(self, request: bytes) -> tuple[int, str]:
+    def raw_socket_request(
+        self, request: bytes, *, shutdown_write: bool = True
+    ) -> tuple[int, str]:
         with socket.create_connection((self.host, self.port), timeout=3) as connection:
             connection.sendall(request)
-            connection.shutdown(socket.SHUT_WR)
+            if shutdown_write:
+                connection.shutdown(socket.SHUT_WR)
             chunks: list[bytes] = []
             while True:
                 chunk = connection.recv(65536)
@@ -158,6 +185,27 @@ class MCPClient:
 
 
 class BaristaMCPAcceptanceTests(unittest.TestCase):
+    @staticmethod
+    def write_test_project(project_dir: Path, settings: str = "") -> None:
+        (project_dir / "addons").symlink_to(
+            PROJECT_DIR / "addons", target_is_directory=True
+        )
+        (project_dir / "bin").symlink_to(PROJECT_DIR / "bin", target_is_directory=True)
+        (project_dir / "project.godot").write_text(
+            f"""config_version=5
+
+[application]
+config/name="BaristaMCP Temporary Test"
+config/features=PackedStringArray("4.7")
+
+{settings}
+
+[editor_plugins]
+enabled=PackedStringArray("res://addons/barista_mcp/plugin.cfg")
+""",
+            encoding="utf-8",
+        )
+
     def initialize_client(self, client: MCPClient) -> None:
         response = client.rpc(
             "initialize",
@@ -288,6 +336,32 @@ class BaristaMCPAcceptanceTests(unittest.TestCase):
             self.assertEqual(status, 413)
             status, _ = client.raw_socket_request(b"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
             self.assertEqual(status, 405)
+
+            encoded_ping = ping.encode("utf-8")
+            status, _ = client.raw_socket_request(
+                (
+                    f"POST /mcp HTTP/1.1\r\n"
+                    f"Host: 127.0.0.1\r\n"
+                    f"Authorization: Bearer {client.token}\r\n"
+                    f"Content-Length: {len(encoded_ping)}\r\n"
+                    f"Transfer-Encoding: chunked\r\n\r\n"
+                ).encode("ascii")
+                + encoded_ping
+            )
+            self.assertEqual(status, 400)
+
+            status, body = client.raw_socket_request(
+                (
+                    f"POST /mcp HTTP/1.1\r\n"
+                    f"Host: 127.0.0.1\r\n"
+                    f"Authorization: Bearer {client.token}\r\n"
+                    f"Content-Length: {len(encoded_ping)}\r\n\r\n"
+                ).encode("ascii")
+                + encoded_ping
+                + b"trailing bytes are outside the declared body"
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["id"], 10)
         finally:
             editor.stop()
 
@@ -384,6 +458,219 @@ class BaristaMCPAcceptanceTests(unittest.TestCase):
             invalid = json.loads(body)
             self.assertIsNone(invalid["id"])
             self.assertEqual(invalid["error"]["code"], -32600)
+        finally:
+            editor.stop()
+
+    def test_protocol_lifecycle_and_envelope_validation(self) -> None:
+        editor = EditorProcess()
+        try:
+            editor.start()
+            client = MCPClient(editor.wait_for_discovery())
+
+            pre_initialize = client.rpc("tools/list", {})
+            self.assertEqual(pre_initialize["error"]["code"], -32002)
+
+            status, body = client.request(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                    "params": {},
+                }
+            )
+            self.assertEqual((status, body), (202, ""))
+            still_uninitialized = client.rpc("tools/list", {})
+            self.assertEqual(still_uninitialized["error"]["code"], -32002)
+
+            for invalid_id in (True, [1], {"value": 1}, 1.5, 1e100):
+                status, body = client.request(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": invalid_id,
+                        "method": "ping",
+                        "params": {},
+                    }
+                )
+                self.assertEqual(status, 200)
+                invalid = json.loads(body)
+                self.assertIsNone(invalid["id"])
+                self.assertEqual(invalid["error"]["code"], -32600)
+
+            status, body = client.request(
+                {"jsonrpc": "2.0", "id": 99, "method": "ping", "params": []}
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["error"]["code"], -32602)
+
+            for incomplete in (
+                {"protocolVersion": "2025-11-25", "clientInfo": {"name": "test", "version": "1"}},
+                {"protocolVersion": "2025-11-25", "capabilities": {}},
+                {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test"},
+                },
+            ):
+                response = client.rpc("initialize", incomplete)
+                self.assertEqual(response["error"]["code"], -32602)
+
+            response = client.rpc(
+                "initialize",
+                {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"},
+                },
+            )
+            self.assertIn("result", response)
+            repeated = client.rpc(
+                "initialize",
+                {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"},
+                },
+            )
+            self.assertEqual(repeated["error"]["code"], -32600)
+            before_notification = client.rpc("tools/list", {})
+            self.assertEqual(before_notification["error"]["code"], -32002)
+
+            status, body = client.request(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                    "params": {},
+                }
+            )
+            self.assertEqual((status, body), (202, ""))
+            self.assertIn("result", client.rpc("tools/list", {}))
+            invalid_list_params = client.rpc("tools/list", "not-an-object")
+            self.assertEqual(invalid_list_params["error"]["code"], -32602)
+        finally:
+            editor.stop()
+
+    def test_oversized_response_is_bounded(self) -> None:
+        editor = EditorProcess()
+        try:
+            editor.start()
+            client = MCPClient(editor.wait_for_discovery())
+            huge_method = "x" * (2 * 1024 * 1024)
+            status, body = client.request(
+                {"jsonrpc": "2.0", "id": 1, "method": huge_method, "params": {}}
+            )
+            self.assertEqual(status, 500)
+            self.assertEqual(json.loads(body), {"error": "response_too_large"})
+        finally:
+            editor.stop()
+
+    def test_invalid_project_setting_types_refuse_start(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="barista-mcp-invalid-settings-") as temporary:
+            project_dir = Path(temporary)
+            self.write_test_project(project_dir, '[barista_mcp]\nserver/port="0"')
+
+            editor = EditorProcess(project_dir)
+            try:
+                editor.start()
+                editor.wait_for_output(
+                    "BaristaMCP: invalid server project settings; refusing to start."
+                )
+                self.assertNotIn(DISCOVERY_PREFIX, "".join(editor.output))
+            finally:
+                editor.stop()
+
+    def test_partial_request_times_out(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="barista-mcp-timeout-") as temporary:
+            project_dir = Path(temporary)
+            self.write_test_project(
+                project_dir, "[barista_mcp]\nserver/request_timeout_ms=200"
+            )
+            editor = EditorProcess(project_dir)
+            try:
+                editor.start()
+                client = MCPClient(editor.wait_for_discovery())
+                partial_body = b'{"jsonrpc":"2.0"'
+                status, body = client.raw_socket_request(
+                    (
+                        f"POST /mcp HTTP/1.1\r\n"
+                        f"Host: 127.0.0.1\r\n"
+                        f"Authorization: Bearer {client.token}\r\n"
+                        f"Content-Length: {len(partial_body) + 20}\r\n\r\n"
+                    ).encode("ascii")
+                    + partial_body,
+                    shutdown_write=False,
+                )
+                self.assertEqual(status, 408)
+                self.assertEqual(json.loads(body), {"error": "request_timeout"})
+            finally:
+                editor.stop()
+
+    def test_unread_large_response_does_not_block_editor(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="barista-mcp-write-timeout-") as temporary:
+            project_dir = Path(temporary)
+            self.write_test_project(
+                project_dir, "[barista_mcp]\nserver/request_timeout_ms=500"
+            )
+            editor = EditorProcess(project_dir)
+            slow_connection: socket.socket | None = None
+            try:
+                editor.start()
+                client = MCPClient(editor.wait_for_discovery())
+                batch = [
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": "x" * 650,
+                        "params": {},
+                    }
+                    for request_id in range(1300)
+                ]
+                encoded_batch = json.dumps(batch, separators=(",", ":")).encode("utf-8")
+                slow_connection = socket.create_connection((client.host, client.port), timeout=3)
+                slow_connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+                slow_connection.sendall(
+                    (
+                        f"POST /mcp HTTP/1.1\r\n"
+                        f"Host: 127.0.0.1\r\n"
+                        f"Authorization: Bearer {client.token}\r\n"
+                        f"Content-Length: {len(encoded_batch)}\r\n\r\n"
+                    ).encode("ascii")
+                    + encoded_batch
+                )
+
+                time.sleep(0.8)
+                self.assertEqual(client.rpc("ping", {})["result"], {})
+            finally:
+                if slow_connection is not None:
+                    slow_connection.close()
+                editor.stop()
+
+    def test_bind_failure_is_reported_without_discovery(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen(1)
+            port = occupied.getsockname()[1]
+            with tempfile.TemporaryDirectory(prefix="barista-mcp-bind-") as temporary:
+                project_dir = Path(temporary)
+                self.write_test_project(
+                    project_dir, f"[barista_mcp]\nserver/port={port}"
+                )
+                editor = EditorProcess(project_dir)
+                try:
+                    editor.start()
+                    editor.wait_for_output("BaristaMCP: failed to bind MCP server")
+                    self.assertNotIn(DISCOVERY_PREFIX, "".join(editor.output))
+                finally:
+                    editor.stop()
+
+    def test_editor_can_shut_down_cleanly_after_startup(self) -> None:
+        editor = EditorProcess(extra_args=("--quit-after", "180"))
+        try:
+            editor.start()
+            editor.wait_for_discovery()
+            assert editor.process is not None
+            return_code = editor.process.wait(timeout=10)
+            if editor.reader is not None:
+                editor.reader.join(timeout=2)
+            self.assertEqual(return_code, 0, "".join(editor.output))
         finally:
             editor.stop()
 

@@ -34,9 +34,12 @@ class MCPServer {
 	uint64_t request_timeout_ms = 30000;
 	int max_request_bytes = 8 * 1024 * 1024;
 	PackedByteArray request_buffer;
+	PackedByteArray response_buffer;
 	int header_end = -1;
 	int content_length = -1;
+	int response_offset = 0;
 	uint64_t connection_started_ms = 0;
+	uint64_t response_started_ms = 0;
 	MCPDispatcher dispatcher;
 	EditorInterface *editor_interface = nullptr;
 
@@ -44,6 +47,7 @@ class MCPServer {
 	void _reset_connection();
 	bool _parse_headers(HTTPRequest &r_request);
 	void _finish_request();
+	void _flush_response();
 	void _send_response(const HTTPResponse &p_response);
 	void _send_error(int p_status, const String &p_reason, const String &p_code);
 	HTTPResponse _process_request(const HTTPRequest &p_request);

@@ -89,10 +89,10 @@ The plugin defines these project settings:
 | --- | ---: | --- |
 | `barista_mcp/server/enabled` | `true` | Start when the editor plugin loads. |
 | `barista_mcp/server/port` | `0` | Use an ephemeral port; values 1–65535 request a fixed port. |
-| `barista_mcp/server/request_timeout_ms` | `30000` | Maximum lifetime of a partial request. |
+| `barista_mcp/server/request_timeout_ms` | `30000` | Maximum lifetime of a partial request or queued response write. |
 | `barista_mcp/server/max_request_bytes` | `8388608` | Maximum complete HTTP request size. |
 
-The listener is always restricted to `127.0.0.1`. There is no setting to expose it to a network interface.
+The listener is always restricted to `127.0.0.1`. There is no setting to expose it to a network interface. Responses are capped at 1 MiB and written incrementally so a client that stops reading cannot block the editor thread.
 
 ## Test
 
@@ -102,7 +102,7 @@ Build the debug extension first, then run the standard-library acceptance suite 
 GODOT_BIN=/path/to/godot python3 -m unittest discover -s tests -v
 ```
 
-The suite launches a real headless editor and verifies discovery, authentication, local-Origin enforcement, HTTP framing errors, MCP initialization and notifications, ping, JSON-RPC errors and batches, and both live editor tools.
+The suite launches a real headless editor and verifies discovery, clean shutdown, configuration and bind failures, authentication, local-Origin enforcement, strict HTTP framing and timeouts, non-blocking response writes, MCP lifecycle and envelope validation, ping, JSON-RPC errors and batches, and both live editor tools.
 
 ## Current scope
 
