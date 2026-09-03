@@ -142,6 +142,10 @@ Dictionary EditorToolProvider::call(
 			return _act_result(EditorActionDriver::failure(EditorActionDriver::Status::AUTOMATION_DISABLED,
 					"Editor automation is disabled in this session; no action was performed."));
 		}
+		// Both gates above are read before the arguments are validated, so neither can name an action
+		// without trusting an argument nothing has checked yet. Ordering integrity outranks field
+		// uniformity here: 'action' and 'claim' are therefore absent from these two refusals, and the
+		// result schema documents that absence rather than the fields carrying a guess.
 		if (!p_mutation_allowed) {
 			return _act_result(EditorActionDriver::failure(EditorActionDriver::Status::MUTATION_ALREADY_HANDLED,
 					"This request already handled a mutating call; no second action was performed."));

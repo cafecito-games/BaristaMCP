@@ -508,7 +508,7 @@ class BaristaMCPActionTests(unittest.TestCase):
         """A field already holding its whole cap accepts no character, so typing into it is refused.
 
         The cap is the field's own published max_length, produced by the real LineEdit the fixture
-        builds (project/addons/barista_mcp_test_fixture/plugin.gd:127) and republished as
+        builds (project/addons/barista_mcp_test_fixture/plugin.gd:129) and republished as
         state.max_length by the snapshot (src/editor_snapshot.cpp:205). type_text is a delivery
         route, and delivery is still a real obligation: a target that will demonstrably reject the
         characters is a failed delivery, not an "ok" with nothing entered.
@@ -561,6 +561,62 @@ class BaristaMCPActionTests(unittest.TestCase):
                 self.assertEqual(refused["route"], "none")
                 self.assertEqual(refused["claim"], "delivery")
         self.assertEqual(find_one(self.client, within_fixture(name="Receipt"))["text"], receipt["text"])
+        self.assertEqual(self.counters(), before)
+
+    def test_no_keyboard_route_delivers_a_character_the_target_drops(self) -> None:
+        """type_text may only claim delivery for characters the text target actually inserts.
+
+        Same defect class as the read-only and full-field cases: a delivery route reporting success
+        for input the target will not accept. Established empirically against Godot 4.7.2 by typing
+        each control character into this fixture's own "Order" LineEdit
+        (project/addons/barista_mcp_test_fixture/plugin.gd:129) and "Notes" TextEdit
+        (project/addons/barista_mcp_test_fixture/plugin.gd:168): every point below U+0020 left the
+        field empty, while U+0020 and every point above it, U+007F included, was inserted. The two
+        classes do not differ: a TextEdit line break comes from the Enter keycode, not from a typed
+        U+000A, so a newline is dropped there too. The floor is encoded at
+        src/editor_action_driver.cpp:50.
+        """
+        before = self.counters()
+        for target in ("Order", "Notes"):
+            self.act(selector=within_fixture(name=target), action="set_text", text="")
+        for target in ("Order", "Notes"):
+            for code in (0x01, 0x08, 0x09, 0x0A, 0x0D, 0x1F):
+                with self.subTest(target=target, code=code):
+                    # Park focus elsewhere, so a refusal that reached the focus grab would show up.
+                    self.act(selector=within_fixture(name="Passcode"), action="focus")
+                    refused = self.act(
+                        selector=within_fixture(name=target), action="type_text", text=chr(code)
+                    )
+                    self.assertIs(refused["ok"], False, refused)
+                    self.assertEqual(refused["status"], "invalid_arguments", refused)
+                    self.assertEqual(refused["route"], "none", refused)
+                    self.assertEqual(refused["claim"], "delivery", refused)
+                    self.assertIs(refused["changed"], False, refused)
+                    element = find_one(self.client, within_fixture(name=target))
+                    # No event was pushed: the field took nothing, and the refusal was decided before
+                    # the element was even asked for focus.
+                    self.assertEqual(element["text"], "")
+                    self.assertIs(element["focused"], False, element)
+        # A refused character does not poison the surrounding text either: the whole argument is
+        # refused, not silently trimmed to its acceptable part.
+        mixed = self.act(selector=within_fixture(name="Order"), action="type_text", text="a" + chr(0x0A) + "b")
+        self.assertIs(mixed["ok"], False, mixed)
+        self.assertEqual(mixed["status"], "invalid_arguments", mixed)
+        self.assertEqual(find_one(self.client, within_fixture(name="Order"))["text"], "")
+
+        # The floor is exactly U+0020, and nothing above it is refused for being unusual.
+        for target in ("Order", "Notes"):
+            for code in (0x20, 0x7F, 0xA0):
+                with self.subTest(target=target, accepted=code):
+                    self.act(selector=within_fixture(name=target), action="set_text", text="")
+                    typed = self.act(
+                        selector=within_fixture(name=target), action="type_text", text=chr(code)
+                    )
+                    self.assertTrue(typed["ok"], typed)
+                    self.assertEqual(typed["route"], "input_event", typed)
+                    self.assertEqual(find_one(self.client, within_fixture(name=target))["text"], chr(code))
+        for target in ("Order", "Notes"):
+            self.act(selector=within_fixture(name=target), action="set_text", text="")
         self.assertEqual(self.counters(), before)
 
     def test_set_checked_and_set_value_and_tabs_and_items_and_scroll(self) -> None:
@@ -709,6 +765,11 @@ class BaristaMCPActionTests(unittest.TestCase):
         self.assertIs(second["ok"], False, second)
         self.assertEqual(second["status"], "mutation_already_handled")
         self.assertEqual(second["route"], "none")
+        # The budget gate is read before the arguments are validated, so it names no action and
+        # therefore declares no claim, exactly as the session gate does. Absence here is the
+        # documented contract (src/mcp_contracts.cpp:322), not an omission.
+        self.assertNotIn("action", second)
+        self.assertNotIn("claim", second)
         # The budget is spent on the attempt, so the batch performed exactly one click.
         self.assertEqual(self.counters()["clicks"], before["clicks"] + 1)
 

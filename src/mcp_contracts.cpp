@@ -319,7 +319,9 @@ Dictionary act_output_schema() {
 			schema, "message", MCPSchema::string("Bounded diagnostic, empty when the action succeeded."), true);
 	MCPSchema::add_property(schema, "action",
 			MCPSchema::enum_string(EditorSnapshot::action_vocabulary(),
-					"The requested action, absent when the request never named an advertised one."),
+					"The requested action. Absent whenever the request was refused before it was parsed, "
+					"which covers both a request that named no advertised action and one refused by the "
+					"session gate or the per-request mutation budget before any action was read."),
 			false);
 	MCPSchema::add_property(schema, "route",
 			MCPSchema::enum_string(EditorActionDriver::route_vocabulary(),
@@ -331,7 +333,8 @@ Dictionary act_output_schema() {
 					"What 'ok' asserts for the requested action. 'delivery' asserts only that the input "
 					"reached the exact requested target, never that the editor did anything in response, so "
 					"the client must observe the editor itself; 'effect' asserts the requested state holds "
-					"and was verified. Absent when the request never named an advertised action."),
+					"and was verified. Absent exactly where 'action' is absent, because a claim is read from "
+					"the named action and is never guessed for a request that was never parsed."),
 			false);
 	MCPSchema::add_property(schema, "changed",
 			MCPSchema::boolean("Whether the acted element's own published fields differ between the capture the "

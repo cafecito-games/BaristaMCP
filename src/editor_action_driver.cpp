@@ -45,6 +45,10 @@ constexpr const char *ACTION_SELECT_ITEM = "select_item";
 constexpr const char *ACTION_SELECT_TAB = "select_tab";
 constexpr const char *ACTION_SCROLL = "scroll";
 
+/// Lowest unicode point a typed key event can carry and still be inserted by LineEdit or TextEdit.
+/// Anything below is dropped by both, so it is not deliverable text.
+constexpr char32_t ACCEPTED_TYPED_UNICODE_FLOOR = 0x20;
+
 constexpr const char *ARGUMENT_TEXT = "text";
 constexpr const char *ARGUMENT_VALUE = "value";
 constexpr const char *ARGUMENT_CHECKED = "checked";
@@ -543,6 +547,23 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 		if (action == ACTION_TYPE_TEXT) {
 			LineEdit *typed_field = Object::cast_to<LineEdit>(p_control);
 			TextEdit *typed_area = Object::cast_to<TextEdit>(p_control);
+			// Both text targets insert a typed key only when the event carries a unicode point at or
+			// above U+0020, and drop everything below it. Established against Godot 4.7.2 by typing each
+			// of U+0001, U+0008, U+0009, U+000A, U+000B, U+000C, U+000D, U+001B and U+001F into the
+			// fixture's "Order" (LineEdit) and "Notes" (TextEdit) fields: every one left the field empty,
+			// while U+0020 and every point above it, U+007F included, was inserted. The two classes do
+			// not differ here: a TextEdit line break comes from the Enter keycode, not from a U+000A
+			// character, so a typed U+000A is dropped there too. Characters the target will not accept
+			// are refused before a single event is pushed, because delivering them would report a
+			// delivery the target demonstrably rejected.
+			for (int i = 0; i < p_request.text.length(); i++) {
+				if (p_request.text[i] < ACCEPTED_TYPED_UNICODE_FLOOR) {
+					r_status = Status::INVALID_ARGUMENTS;
+					r_message = "The text contains a character the element will not accept: text fields take "
+								"only typed characters from U+0020 upward.";
+					return false;
+				}
+			}
 			// A read-only field drops every character handed to it, so typing into one is input the
 			// target does not accept, not a delivery the editor merely chose to ignore.
 			if ((typed_field != nullptr && !typed_field->is_editable()) ||
