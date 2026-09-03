@@ -175,6 +175,8 @@ class BaristaMCPResourceTests(unittest.TestCase):
                     "find_editor_ui",
                     "read_editor_state",
                     "inspect_editor_ui",
+                    "wait_for_editor",
+                    "poll_barista_events",
                 ],
             )
             for tool in tools:

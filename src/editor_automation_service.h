@@ -11,12 +11,15 @@
 
 #include "editor_action_driver.h"
 #include "editor_automation_types.h"
+#include "editor_event_log.h"
+#include "editor_wait_manager.h"
 
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/string.hpp>
 
 #include <cstdint>
 #include <map>
+#include <vector>
 
 namespace godot {
 
@@ -49,6 +52,10 @@ class EditorAutomationService {
 	// The canonical form of the selector that produced the cached capture. A cursor is resumable only
 	// for that exact query, so identity never rests on a hash alone.
 	String cached_selector;
+	// The bounded event ring and the cooperative wait handles this session owns. Waits are advanced
+	// only from process frames, so no request ever blocks the editor thread waiting for the editor.
+	EditorEventLog event_log;
+	EditorWaitManager wait_manager;
 
 	// Captures a snapshot inside the published payload budget and registers every handle it issued.
 	bool _capture(const EditorSnapshotOptions &p_requested, EditorSnapshotData &r_data, Dictionary &r_payload,
@@ -66,6 +73,14 @@ class EditorAutomationService {
 	bool _resolve_target(const Dictionary &p_arguments, const EditorActionRequest &p_request,
 			EditorSnapshotData &r_data, const EditorElement **r_element, Dictionary &r_failure, String &r_error,
 			String &r_message);
+	// The act_on_editor_ui body. It appends one bounded trace entry per decision it makes, so a
+	// failure can publish how far the request got without the caller reconstructing it.
+	Dictionary _act_ui(const Dictionary &p_arguments, std::vector<String> &r_trace, String &r_error, String &r_message);
+	// Assembles the editor reading one evaluation tick is decided against. A capture is taken only
+	// when p_capture is true, and it never touches the public snapshot generation, the issued-handle
+	// registry, or the cached capture a selector cursor resumes against.
+	void _build_wait_context(
+			bool p_capture, uint64_t p_now_ms, EditorWaitContext &r_context, EditorSnapshotData &r_snapshot);
 
 public:
 	void configure(EditorInterface *p_editor_interface, bool p_automation_enabled);
@@ -80,6 +95,12 @@ public:
 	// Returns the structured act_on_editor_ui payload. Every client-provokable failure is reported
 	// inside the payload as an action status; r_error is set only when the editor cannot be inspected.
 	Dictionary act_ui(const Dictionary &p_arguments, String &r_error, String &r_message);
+	// Returns the structured wait_for_editor payload: start, poll, or cancel one bounded cooperative
+	// wait. Every client-provokable failure is reported inside the payload as a wait status.
+	Dictionary wait_for_editor(const Dictionary &p_arguments, String &r_error, String &r_message);
+	// Returns the structured poll_barista_events payload: one bounded page of the Barista-owned event
+	// ring, resumed from a marker this server issued.
+	Dictionary poll_events(const Dictionary &p_arguments, String &r_error, String &r_message);
 	// Returns one element, with or without its subtree, for the barista://ui/element and
 	// barista://ui/subtree resource templates.
 	Dictionary read_element(const String &p_handle, bool p_include_children, String &r_error, String &r_message);

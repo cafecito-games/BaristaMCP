@@ -10,8 +10,10 @@
 
 #include "editor_action_driver.h"
 #include "editor_automation_types.h"
+#include "editor_event_log.h"
 #include "editor_selector.h"
 #include "editor_snapshot.h"
+#include "editor_wait_manager.h"
 #include "mcp_schema.h"
 
 #include <godot_cpp/variant/variant.hpp>
@@ -346,8 +348,196 @@ Dictionary act_output_schema() {
 			true);
 	MCPSchema::add_property(schema, "handle",
 			MCPSchema::string("Handle of the element acted on, or an empty string when none was resolved."), true);
+	MCPSchema::add_property(schema, "trace",
+			MCPSchema::array(MCPSchema::string(),
+					"Bounded record of how far the request got, published only on a refusal. It is a "
+					"diagnostic, never a second contract: an entry is a short human-readable step, and both "
+					"the number of entries and their length are capped."),
+			false);
 	MCPSchema::add_definition(schema, UI_MATCH_DEFINITION, ui_element_schema(false));
 	MCPSchema::add_property(schema, "element", MCPSchema::reference(UI_MATCH_DEFINITION), false);
+	return schema;
+}
+
+Dictionary wait_condition_schema() {
+	Dictionary schema = MCPSchema::object(
+			"One wait condition. Every field belongs to exactly one condition type, and a field the named "
+			"type does not use is rejected rather than ignored.");
+	MCPSchema::add_property(schema, "type",
+			MCPSchema::enum_string(EditorWaitManager::condition_vocabulary(),
+					"What this wait observes. 'frames_elapsed' counts editor process frames; "
+					"'selector_appears' and 'selector_disappears' watch a semantic selector, and absence is "
+					"only ever reported from a capture and a walk that were not cut short; 'selector_state' "
+					"waits until the single element 'selector' names also satisfies 'state'; 'focus_changed' "
+					"waits until focus leaves the element that held it when the wait was created; "
+					"'play_state' waits for the requested play state; 'filesystem_settles' waits until the "
+					"editor resource filesystem is neither scanning nor importing."),
+			true);
+	MCPSchema::add_property(schema, "frames",
+			MCPSchema::ranged_integer(EditorWaitLimits::MIN_FRAMES, EditorWaitLimits::MAX_FRAMES,
+					"Editor process frames frames_elapsed waits for."),
+			false);
+	MCPSchema::add_property(schema, "selector", selector_input_schema(), false);
+	MCPSchema::add_property(schema, "state",
+			MCPSchema::open_object("Extra constraints the element named by 'selector' must satisfy, for "
+								   "selector_state. It takes the same fields as a selector except 'handle': "
+								   "'selector' names the element and 'state' names what must become true of "
+								   "it, so a handle here is rejected rather than overwritten."),
+			false);
+	MCPSchema::add_property(schema, "playing", MCPSchema::boolean("Play state play_state waits for."), false);
+	MCPSchema::add_property(schema, "require_start",
+			MCPSchema::boolean("For filesystem_settles: wait until the editor is first observed busy and only "
+							   "then wait for it to become idle. A scan raises its own busy flag "
+							   "asynchronously, so a drain-only wait against a scan that has been requested "
+							   "but has not started yet would report a settle that never happened. When the "
+							   "prime window passes without the editor ever being observed busy the wait ends "
+							   "as 'not_started', never as 'complete'. Leave it false for an operation that "
+							   "completes synchronously and only might trigger a tail scan, because priming "
+							   "one of those would always report 'not_started'."),
+			false);
+	MCPSchema::add_property(schema, "prime_ms",
+			MCPSchema::ranged_integer(EditorWaitLimits::MIN_PRIME_MS, EditorWaitLimits::MAX_PRIME_MS,
+					"How long a primed filesystem_settles wait will watch for the editor to become busy "
+					"before it reports 'not_started'. It applies only when 'require_start' is true and must "
+					"not exceed 'timeout_ms'."),
+			false);
+	return schema;
+}
+
+Dictionary wait_input_schema() {
+	Dictionary schema = MCPSchema::object(
+			"One cooperative wait request. Exactly one of 'condition', which starts a wait, and 'wait_id', "
+			"which polls or cancels one, must be present. Nothing here blocks the editor: a wait advances "
+			"only on later editor frames, so a pending wait is polled rather than slept on.");
+	MCPSchema::add_property(schema, "condition", wait_condition_schema(), false);
+	MCPSchema::add_property(schema, "wait_id",
+			MCPSchema::string("Opaque wait id this server issued. It is unique to this server session and is "
+							  "never reissued."),
+			false);
+	MCPSchema::add_property(schema, "cancel",
+			MCPSchema::boolean("Cancel the named wait instead of polling it. Cancelling is idempotent inside "
+							   "the published retention window."),
+			false);
+	MCPSchema::add_property(schema, "timeout_ms",
+			MCPSchema::ranged_integer(EditorWaitLimits::MIN_TIMEOUT_MS, EditorWaitLimits::MAX_TIMEOUT_MS,
+					"Deadline for a wait this request starts. It belongs to a start request only; a wait keeps "
+					"the deadline it was created with."),
+			false);
+	return schema;
+}
+
+Dictionary wait_output_schema() {
+	Dictionary schema = MCPSchema::object("Result of one cooperative wait request.");
+	MCPSchema::add_property(schema, "ok",
+			MCPSchema::boolean("True only when the status is 'complete'. It asserts exactly one thing: the "
+							   "waited-for condition was observed to hold."),
+			true);
+	MCPSchema::add_property(schema, "status",
+			MCPSchema::enum_string(EditorWaitManager::status_vocabulary(),
+					"Wait status. 'pending' means poll again; 'complete' means the condition was observed; "
+					"'not_started' means a primed settle never observed the editor become busy, so settling "
+					"was never confirmed; 'wait_timeout' and 'wait_cancelled' end the wait; 'wait_not_found' "
+					"answers an id this session does not hold."),
+			true);
+	MCPSchema::add_property(
+			schema, "message", MCPSchema::string("Bounded diagnostic, empty when nothing was refused."), true);
+	MCPSchema::add_property(schema, "wait_id",
+			MCPSchema::string("Opaque handle to poll or cancel, or an empty string when no handle exists: a "
+							  "condition already satisfied completes without creating one, and a refused "
+							  "request never creates one."),
+			true);
+	MCPSchema::add_property(schema, "condition",
+			MCPSchema::enum_string(EditorWaitManager::reported_condition_vocabulary(),
+					"The condition this result is about, or 'none' when the request was refused before any "
+					"condition could be read."),
+			true);
+	MCPSchema::add_property(schema, "elapsed_ms", MCPSchema::integer("Milliseconds since the wait was created."), true);
+	MCPSchema::add_property(schema, "remaining_ms",
+			MCPSchema::integer("Milliseconds left before the deadline, 0 once terminal."), true);
+	MCPSchema::add_property(schema, "timeout_ms", MCPSchema::integer("Deadline the wait was created with."), true);
+	MCPSchema::add_property(schema, "frames_observed",
+			MCPSchema::integer("Editor process frames this wait has been evaluated on."), true);
+	MCPSchema::add_property(
+			schema, "active_waits", MCPSchema::integer("Wait handles this session currently holds."), true);
+	MCPSchema::add_property(schema, "detail",
+			MCPSchema::open_object("Bounded observation from the last evaluation, such as the match count or "
+								   "whether the editor was observed busy."),
+			true);
+	MCPSchema::add_property(schema, "limits",
+			MCPSchema::open_object("Published wait limits: handle count, deadline range, prime range, frame "
+								   "range, evaluation interval, and how long a terminal outcome stays readable."),
+			true);
+	return schema;
+}
+
+constexpr const char *BARISTA_EVENT_DEFINITION = "barista_event";
+
+Dictionary barista_event_schema() {
+	Dictionary schema = MCPSchema::object("One Barista-owned event.");
+	MCPSchema::add_property(schema, "index",
+			MCPSchema::integer("Monotonic index for this server session. The next marker is this index plus one."),
+			true);
+	MCPSchema::add_property(
+			schema, "time_ms", MCPSchema::integer("Engine millisecond tick when this was recorded."), true);
+	MCPSchema::add_property(schema, "type",
+			MCPSchema::enum_string(EditorEventLog::type_vocabulary(), "What kind of Barista operation this was."),
+			true);
+	MCPSchema::add_property(
+			schema, "operation", MCPSchema::string("Bounded name of the operation, empty when it has none."), true);
+	MCPSchema::add_property(schema, "outcome",
+			MCPSchema::string("Bounded outcome, empty on a begin event because the outcome is not known yet."), true);
+	MCPSchema::add_property(schema, "detail", MCPSchema::open_object("Bounded detail for this event."), true);
+	return schema;
+}
+
+Dictionary events_input_schema() {
+	Dictionary schema = MCPSchema::object("One bounded page of the Barista-owned event ring.");
+	MCPSchema::add_property(schema, "marker",
+			MCPSchema::ranged_integer(0, EditorEventLimits::MAX_MARKER,
+					"Resume from this marker, which is the index of the first event to return. Absent starts "
+					"at the earliest event still stored. Only a marker this server issued names a page."),
+			false);
+	MCPSchema::add_property(schema, "limit",
+			MCPSchema::ranged_integer(
+					EditorEventLimits::MIN_LIMIT, EditorEventLimits::MAX_LIMIT, "Maximum events returned in one page."),
+			false);
+	return schema;
+}
+
+Dictionary events_output_schema() {
+	Dictionary schema = MCPSchema::object(
+			"One bounded page of Barista-owned events. Indices are monotonic for the life of one server "
+			"session, and a page never repeats an event for a valid marker.");
+	MCPSchema::add_property(schema, "ok", MCPSchema::boolean("True only when the status is 'ok'."), true);
+	MCPSchema::add_property(schema, "status",
+			MCPSchema::enum_string(EditorEventLog::status_vocabulary(),
+					"'marker_expired' means the bounded ring dropped the events that marker named, and "
+					"'marker' then carries the earliest marker still available; 'invalid_marker' means the "
+					"marker was never issued by this session."),
+			true);
+	MCPSchema::add_property(
+			schema, "message", MCPSchema::string("Bounded diagnostic, empty when the page was served."), true);
+	MCPSchema::add_property(schema, "marker",
+			MCPSchema::integer("Marker to pass next. After a served page it names the event after the last one "
+							   "returned; after an expiry it names the earliest event still stored."),
+			true);
+	MCPSchema::add_property(
+			schema, "earliest_marker", MCPSchema::integer("Earliest marker the ring can still serve."), true);
+	MCPSchema::add_property(
+			schema, "latest_marker", MCPSchema::integer("Marker naming the next event this session will issue."), true);
+	MCPSchema::add_property(schema, "count", MCPSchema::integer("Events carried by this page."), true);
+	MCPSchema::add_property(
+			schema, "has_more", MCPSchema::boolean("Whether events remain after this page's marker."), true);
+	MCPSchema::add_property(schema, "dropped",
+			MCPSchema::integer("Events this bounded ring evicted since the session started, so an empty page "
+							   "can be told apart from a page that was lost."),
+			true);
+	MCPSchema::add_property(schema, "limit", MCPSchema::integer("Page size applied to this request."), true);
+	MCPSchema::add_property(schema, "limits",
+			MCPSchema::open_object("Published event limits: ring capacity and page-size range."), true);
+	MCPSchema::add_definition(schema, BARISTA_EVENT_DEFINITION, barista_event_schema());
+	MCPSchema::add_property(schema, "events",
+			MCPSchema::array(MCPSchema::reference(BARISTA_EVENT_DEFINITION), "Events in index order."), true);
 	return schema;
 }
 
@@ -420,6 +610,17 @@ Array MCPContracts::build_tools_list(bool p_mutation_enabled) {
 	tools.push_back(make_tool("inspect_editor_ui",
 			"Capture a bounded semantic snapshot of the stock Godot editor UI through public APIs.",
 			ui_snapshot_output_schema(), ui_snapshot_input_schema()));
+	tools.push_back(make_tool("wait_for_editor",
+			"Start, poll, or cancel one bounded cooperative wait on observable editor state. Nothing blocks "
+			"the editor: a wait advances only on later editor frames, so a pending wait is polled rather "
+			"than slept on. A settle wait can be primed, so an operation that never started reports "
+			"'not_started' instead of a settle that never happened.",
+			wait_output_schema(), wait_input_schema()));
+	tools.push_back(make_tool("poll_barista_events",
+			"Read a bounded page of Barista-owned events: lifecycle, actions, and waits Barista itself "
+			"performed or observed through public APIs. It never claims to mirror the internal Godot editor "
+			"log.",
+			events_output_schema(), events_input_schema()));
 	if (p_mutation_enabled) {
 		Dictionary act = make_tool(ACT_TOOL_NAME,
 				"Act on the single editor UI element a selector names, through documented public Godot APIs. "

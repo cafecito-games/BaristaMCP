@@ -14,10 +14,15 @@
 #include "mcp_contracts.h"
 
 #include <godot_cpp/classes/control.hpp>
+#include <godot_cpp/classes/editor_file_system.hpp>
+#include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/variant.hpp>
+
+#include <utility>
 
 namespace godot {
 
@@ -42,6 +47,10 @@ int64_t serialized_size(const Dictionary &p_payload) {
 void EditorAutomationService::configure(EditorInterface *p_editor_interface, bool p_automation_enabled) {
 	editor_interface = p_editor_interface;
 	automation_enabled = p_automation_enabled;
+	wait_manager.configure(&event_log);
+	Dictionary detail;
+	detail["automation_enabled"] = p_automation_enabled;
+	event_log.record(EditorEventLog::TYPE_LIFECYCLE, "server_start", "ok", detail);
 }
 
 bool EditorAutomationService::is_automation_enabled() const {
@@ -594,29 +603,76 @@ bool EditorAutomationService::_resolve_target(const Dictionary &p_arguments, con
 	return true;
 }
 
+// Bounds the trace one action publishes. A trace is a diagnostic, never a second contract, so it is
+// capped in both entry count and entry length before it can reach a payload.
+namespace {
+
+constexpr int MAX_TRACE_ENTRIES = 16;
+constexpr int MAX_TRACE_LENGTH = 200;
+
+void push_trace(std::vector<String> &r_trace, const String &p_entry) {
+	if ((int)r_trace.size() >= MAX_TRACE_ENTRIES) {
+		return;
+	}
+	r_trace.push_back(p_entry.length() <= MAX_TRACE_LENGTH ? p_entry : p_entry.substr(0, MAX_TRACE_LENGTH));
+}
+
+} // namespace
+
 Dictionary EditorAutomationService::act_ui(const Dictionary &p_arguments, String &r_error, String &r_message) {
+	// The action name was already checked against the advertised vocabulary at the request boundary,
+	// so recording it here can only ever record an advertised action or nothing at all.
+	const Variant action_value = p_arguments.get("action", Variant());
+	const String requested_action = action_value.get_type() == Variant::STRING ? String(action_value) : String();
+	event_log.record(EditorEventLog::TYPE_ACTION_BEGIN, requested_action, String());
+
+	std::vector<String> trace;
+	Dictionary payload = _act_ui(p_arguments, trace, r_error, r_message);
+	if (!r_error.is_empty()) {
+		event_log.record(EditorEventLog::TYPE_ACTION_END, requested_action, r_error);
+		return payload;
+	}
+	event_log.record(EditorEventLog::TYPE_ACTION_END, requested_action, payload.get("status", String()));
+	if (!(bool)payload.get("ok", false)) {
+		Array entries;
+		for (const String &entry : trace) {
+			entries.push_back(entry);
+		}
+		payload["trace"] = entries;
+	}
+	return payload;
+}
+
+Dictionary EditorAutomationService::_act_ui(
+		const Dictionary &p_arguments, std::vector<String> &r_trace, String &r_error, String &r_message) {
 	r_error = String();
 	r_message = String();
 
 	// The gate is entry-time state frozen at startup, so it is read before anything else can capture
 	// or mutate.
 	if (!automation_enabled) {
+		push_trace(r_trace, "gate: automation disabled");
 		return EditorActionDriver::failure(EditorActionDriver::Status::AUTOMATION_DISABLED,
 				"Editor automation is disabled in this session; no action was performed.");
 	}
+	push_trace(r_trace, "gate: automation enabled");
 
 	EditorActionRequest request;
 	String parse_message;
 	if (!EditorActionDriver::parse(p_arguments, request, parse_message)) {
+		push_trace(r_trace, "parse: rejected");
 		return EditorActionDriver::failure(EditorActionDriver::Status::INVALID_ARGUMENTS, parse_message);
 	}
+	push_trace(r_trace, "parse: action=" + request.action);
 
 	EditorSnapshotData before;
 	const EditorElement *element = nullptr;
 	Dictionary failure;
 	if (!_resolve_target(p_arguments, request, before, &element, failure, r_error, r_message)) {
+		push_trace(r_trace, "resolve: " + (r_error.is_empty() ? String(failure.get("status", String())) : r_error));
 		return r_error.is_empty() ? failure : Dictionary();
 	}
+	push_trace(r_trace, "resolve: handle=" + element->handle + " class=" + element->class_name);
 
 	// The element proves a live node with this instance id is in the editor tree, so the lookup below
 	// can only return that node; the recorded class is re-checked all the same.
@@ -625,6 +681,7 @@ Dictionary EditorAutomationService::act_ui(const Dictionary &p_arguments, String
 			parse_handle(element->handle, instance_id) ? UtilityFunctions::instance_from_id(instance_id) : nullptr;
 	Control *control = Object::cast_to<Control>(object);
 	if (object == nullptr || object->get_class() != element->class_name || control == nullptr) {
+		push_trace(r_trace, "bind: element is no longer an interactable control");
 		Dictionary payload = EditorActionDriver::failure(EditorActionDriver::Status::ELEMENT_NOT_INTERACTABLE,
 				"The element is no longer an interactable control.", request.action);
 		payload["handle"] = element->handle;
@@ -639,11 +696,16 @@ Dictionary EditorAutomationService::act_ui(const Dictionary &p_arguments, String
 	EditorActionDriver::Status status = EditorActionDriver::Status::OK;
 	String action_message;
 	if (!EditorActionDriver::perform(control, *element, request, route, status, action_message)) {
+		push_trace(r_trace,
+				"perform: " + EditorActionDriver::status_name(status) +
+						" route=" + EditorActionDriver::route_name(route));
 		Dictionary payload = EditorActionDriver::failure(status, action_message, request.action);
 		payload["handle"] = handle;
 		payload["generation"] = (int64_t)before.generation;
 		return payload;
 	}
+
+	push_trace(r_trace, "perform: ok route=" + EditorActionDriver::route_name(route));
 
 	// The result names the snapshot taken after the action, never the one the action was decided on.
 	EditorSnapshotData after;
@@ -676,11 +738,179 @@ Dictionary EditorAutomationService::act_ui(const Dictionary &p_arguments, String
 	return payload;
 }
 
+namespace {
+
+// Every handle a wait condition names, across both of its selectors.
+PackedStringArray condition_handles(const EditorWaitCondition &p_condition) {
+	PackedStringArray handles;
+	if (p_condition.selector != nullptr) {
+		handles.append_array(EditorSelector::handles(*p_condition.selector));
+	}
+	if (p_condition.state != nullptr) {
+		handles.append_array(EditorSelector::handles(*p_condition.state));
+	}
+	return handles;
+}
+
+} // namespace
+
+Dictionary EditorAutomationService::wait_for_editor(const Dictionary &p_arguments, String &r_error, String &r_message) {
+	r_error = String();
+	r_message = String();
+
+	Time *time = Time::get_singleton();
+	const uint64_t now_ms = time == nullptr ? 0 : time->get_ticks_msec();
+
+	const bool has_condition = p_arguments.has("condition");
+	const bool has_wait_id = p_arguments.has("wait_id");
+	if (has_condition == has_wait_id) {
+		return wait_manager.failure(EditorWaitManager::Status::INVALID_ARGUMENTS,
+				"wait_for_editor takes exactly one of 'condition', to start a wait, and 'wait_id', to poll or "
+				"cancel one.");
+	}
+
+	if (has_wait_id) {
+		if (p_arguments.has("timeout_ms")) {
+			return wait_manager.failure(EditorWaitManager::Status::INVALID_ARGUMENTS,
+					"'timeout_ms' belongs to a start request; a wait keeps the deadline it was created with.");
+		}
+		const Variant id_value = p_arguments.get("wait_id", Variant());
+		if (id_value.get_type() != Variant::STRING) {
+			return wait_manager.failure(
+					EditorWaitManager::Status::INVALID_ARGUMENTS, "'wait_id' must be a string this server issued.");
+		}
+		const bool cancel_requested = p_arguments.has("cancel") && (bool)p_arguments.get("cancel", false);
+		// Both routes read a wait id this server issued earlier; neither is validated against anything
+		// the current request created.
+		return cancel_requested ? wait_manager.cancel(String(id_value), now_ms)
+								: wait_manager.poll(String(id_value), now_ms);
+	}
+
+	if (p_arguments.has("cancel")) {
+		return wait_manager.failure(EditorWaitManager::Status::INVALID_ARGUMENTS,
+				"'cancel' names an existing wait id; a request that starts a wait never cancels one.");
+	}
+
+	EditorWaitCondition condition;
+	String condition_message;
+	if (!EditorWaitManager::parse_condition(p_arguments.get("condition", Variant()), condition, condition_message)) {
+		return wait_manager.failure(EditorWaitManager::Status::INVALID_ARGUMENTS, condition_message);
+	}
+
+	int timeout_ms = EditorWaitLimits::DEFAULT_TIMEOUT_MS;
+	if (p_arguments.has("timeout_ms")) {
+		// The advertised range is enforced by the boundary schema, so this conversion cannot narrow.
+		timeout_ms = clamp_int((int64_t)p_arguments.get("timeout_ms", timeout_ms), EditorWaitLimits::MIN_TIMEOUT_MS,
+				EditorWaitLimits::MAX_TIMEOUT_MS);
+	}
+	if (condition.type == EditorWaitManager::CONDITION_FILESYSTEM_SETTLES && condition.require_start &&
+			condition.prime_ms > timeout_ms) {
+		return wait_manager.failure(EditorWaitManager::Status::INVALID_ARGUMENTS,
+				"'prime_ms' must not exceed 'timeout_ms'; a prime window longer than the deadline could never "
+				"be observed.");
+	}
+
+	// The issued-handle registry is consulted before this request captures anything, so a handle
+	// Barista never issued can never be admitted by the very request that supplied it.
+	const PackedStringArray handles = condition_handles(condition);
+	for (int i = 0; i < handles.size(); i++) {
+		uint64_t instance_id = 0;
+		if (!parse_handle(handles[i], instance_id) || issued_handles.find(instance_id) == issued_handles.end()) {
+			return wait_manager.failure(EditorWaitManager::Status::INVALID_ARGUMENTS,
+					"Handle '" + handles[i] + "' was not issued by Barista.");
+		}
+	}
+
+	EditorWaitContext context;
+	EditorSnapshotData snapshot;
+	_build_wait_context(true, now_ms, context, snapshot);
+	return wait_manager.start(std::move(condition), timeout_ms, context);
+}
+
+Dictionary EditorAutomationService::poll_events(const Dictionary &p_arguments, String &r_error, String &r_message) {
+	r_error = String();
+	r_message = String();
+	int limit = EditorEventLimits::DEFAULT_LIMIT;
+	if (p_arguments.has("limit")) {
+		limit = clamp_int(
+				(int64_t)p_arguments.get("limit", limit), EditorEventLimits::MIN_LIMIT, EditorEventLimits::MAX_LIMIT);
+	}
+	const bool has_marker = p_arguments.has("marker");
+	const int64_t marker = has_marker ? (int64_t)p_arguments.get("marker", Variant((int64_t)0)) : 0;
+	return event_log.poll(has_marker, marker, limit);
+}
+
+namespace {
+
+// The first focused element in document order. Focus identity is published as a durable handle, so a
+// focus change is compared between captures rather than against a capture-scoped element id.
+const EditorElement *find_focused(const std::vector<EditorElement> &p_elements) {
+	for (const EditorElement &element : p_elements) {
+		if (element.focused) {
+			return &element;
+		}
+		const EditorElement *found = find_focused(element.children);
+		if (found != nullptr) {
+			return found;
+		}
+	}
+	return nullptr;
+}
+
+} // namespace
+
+void EditorAutomationService::_build_wait_context(
+		bool p_capture, uint64_t p_now_ms, EditorWaitContext &r_context, EditorSnapshotData &r_snapshot) {
+	r_context.now_ms = p_now_ms;
+	if (editor_interface == nullptr) {
+		return;
+	}
+	r_context.is_playing = editor_interface->is_playing_scene();
+	EditorFileSystem *file_system = editor_interface->get_resource_filesystem();
+	if (file_system != nullptr) {
+		r_context.filesystem_available = true;
+		// Importing is part of settling: a scan that has finished walking but is still importing has
+		// not left the editor in a state an agent can act against.
+		r_context.filesystem_busy = file_system->is_scanning() || file_system->is_importing();
+	}
+	if (!p_capture) {
+		return;
+	}
+	// Wait evaluation always uses the default published capture options, so a wait can only ever
+	// observe elements a default capture reaches. It deliberately does not go through _capture: the
+	// public generation, the issued-handle registry, and the cached capture a cursor resumes against
+	// are request-owned state that a background frame must never move.
+	const EditorSnapshotOptions options;
+	if (!EditorSnapshot::capture(editor_interface, 0, options, r_snapshot)) {
+		return;
+	}
+	r_snapshot.requested_options = options;
+	r_snapshot.applied_options = options;
+	r_context.has_snapshot = true;
+	r_context.snapshot = &r_snapshot;
+	const EditorElement *focused = find_focused(r_snapshot.roots);
+	r_context.focused_handle = focused == nullptr ? String() : focused->handle;
+}
+
 void EditorAutomationService::process(double p_delta) {
 	(void)p_delta;
+	// No wait outstanding means no reading at all, so an idle editor pays nothing for this feature.
+	if (!wait_manager.has_waits()) {
+		return;
+	}
+	Time *time = Time::get_singleton();
+	const uint64_t now_ms = time == nullptr ? 0 : time->get_ticks_msec();
+	EditorWaitContext context;
+	EditorSnapshotData snapshot;
+	_build_wait_context(wait_manager.needs_snapshot(now_ms), now_ms, context, snapshot);
+	wait_manager.process(context);
 }
 
 void EditorAutomationService::shutdown() {
+	// Every handle is cancelled and cleared before anything else is released, so a shutdown leaves no
+	// wait behind for a later frame or a later request to find.
+	wait_manager.shutdown();
+	event_log.clear();
 	editor_interface = nullptr;
 	issued_handles.clear();
 	cached_snapshot = EditorSnapshotData();
