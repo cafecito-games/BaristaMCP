@@ -164,14 +164,21 @@ class BaristaMCPSelectorTests(unittest.TestCase):
         self.assertEqual(rejected["matches"], [])
         self.assertGreater(rejected["match_count"], 1)
 
-        # Uniqueness can only be certified against a capture that omitted nothing.
-        unique = self.find(
-            selector={"role": "button", "name": "Brew"}, require_unique=True, max_depth=32
-        )
+        # Uniqueness can only be certified against a capture that omitted nothing, so the default
+        # max_depth (EditorSnapshotLimits::DEFAULT_MAX_DEPTH, src/editor_automation_types.h) must be
+        # deep enough to leave the editor's own tree untruncated. A unique selector must succeed with
+        # no other arguments at all.
+        unique = self.find(selector={"role": "button", "name": "Brew"}, require_unique=True)
         self.assertTrue(unique["ok"], unique)
+        self.assertEqual(unique["status"], "ok")
+        self.assertEqual(unique["match_count"], 1)
         self.assertIs(unique["truncated"], False)
 
-        truncated = self.find(selector={"role": "button", "name": "Brew"}, require_unique=True)
+        # An explicitly shallow capture is still truncated, and a truncated capture still refuses to
+        # certify uniqueness rather than reporting the first match it happened to reach.
+        truncated = self.find(
+            selector={"role": "button", "name": "Brew"}, require_unique=True, max_depth=8
+        )
         self.assertFalse(truncated["ok"], truncated)
         self.assertEqual(truncated["status"], "ambiguous_selector")
         self.assertIs(truncated["truncated"], True)

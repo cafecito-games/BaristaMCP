@@ -204,6 +204,15 @@ class BaristaMCPUISnapshotTests(unittest.TestCase):
         assert_internal_is_inherited(internal["tree"], False)
 
     def test_limits_are_clamped_and_truncation_is_published(self) -> None:
+        # The published default (EditorSnapshotLimits::DEFAULT_MAX_DEPTH,
+        # src/editor_automation_types.h) must reach the whole editor tree, so a capture taken with no
+        # arguments is not depth-truncated and stays inside the element budget.
+        default = self.client.structured_tool("inspect_editor_ui", {})
+        self.assertEqual(default["limits"]["max_depth"], 32)
+        self.assertIs(default["limits"]["depth_truncated"], False)
+        self.assertIs(default["limits"]["element_limit_reached"], False)
+        self.assertLess(default["element_count"], 2000)
+
         shallow = self.client.structured_tool("inspect_editor_ui", {"max_depth": 0})
         self.assertEqual(shallow["limits"]["max_depth"], 1)
         self.assertTrue(shallow["limits"]["depth_truncated"])

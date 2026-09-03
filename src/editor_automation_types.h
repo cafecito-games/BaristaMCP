@@ -24,7 +24,11 @@ namespace godot {
 struct EditorSnapshotLimits {
 	static constexpr int MIN_MAX_DEPTH = 1;
 	static constexpr int MAX_MAX_DEPTH = 32;
-	static constexpr int DEFAULT_MAX_DEPTH = 8;
+	// The editor's own control tree is deeper than a shallow default can reach, and a truncated
+	// capture can never certify uniqueness, so the default is the clamp maximum: at 8 the capture is
+	// depth-truncated and require_unique always answers ambiguous_selector, while at 32 it is
+	// untruncated and stays far inside the element and payload budgets below.
+	static constexpr int DEFAULT_MAX_DEPTH = MAX_MAX_DEPTH;
 	static constexpr int MIN_MAX_ELEMENTS = 1;
 	static constexpr int MAX_MAX_ELEMENTS = 2000;
 	static constexpr int DEFAULT_MAX_ELEMENTS = 1000;
