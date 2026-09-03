@@ -323,6 +323,15 @@ class BaristaMCPUISnapshotTraversalBudgetTests(unittest.TestCase):
     WIDE_INTERNAL_CHILDREN = 60_000
 
     def test_wide_internal_child_lists_are_bounded_by_the_traversal_budget(self) -> None:
+        """Test power: this asserts the published contract, not the work performed.
+
+        It proves the response is honest and arrives inside the socket timeout for a wide
+        internal child list. It cannot observe whether the traversal materialized a full
+        child listing before bounding it; that property rests on
+        src/editor_snapshot.cpp SnapshotBuilder::collect_children reading children through
+        Node::get_child_count/Node::get_child, whose presence in the pinned public API is
+        checked by BaristaMCPUISnapshotPortabilityTests below.
+        """
         with tempfile.TemporaryDirectory(prefix="barista-mcp-wide-fixture-") as temporary:
             project_dir = Path(temporary)
             write_test_project(
@@ -419,7 +428,7 @@ class BaristaMCPUISnapshotPortabilityTests(unittest.TestCase):
             "Slider": ("is_editable",),
             "SpinBox": ("is_editable",),
             "LineEdit": ("get_text", "is_editable", "is_secret"),
-            "Node": ("get_child_count", "get_children", "get_name"),
+            "Node": ("get_child", "get_child_count", "get_name"),
             "Object": ("get_class", "get_instance_id", "is_class"),
             "OptionButton": ("get_selected",),
             "PopupMenu": ("get_item_count",),

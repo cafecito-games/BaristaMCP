@@ -31,7 +31,6 @@
 #include <godot_cpp/classes/window.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
-#include <godot_cpp/variant/typed_array.hpp>
 #include <godot_cpp/variant/variant.hpp>
 
 #include <unordered_set>
@@ -216,6 +215,9 @@ Dictionary control_state(Control *p_control, const String &p_role) {
 	ItemList *item_list = Object::cast_to<ItemList>(p_control);
 	if (item_list != nullptr) {
 		state["item_count"] = item_list->get_item_count();
+		// get_selected_items() is the only public accessor for the selection and it returns a fresh
+		// array, so the cap below can only be applied after the fact. The array it builds is bounded by
+		// one control's item count and no request argument widens it.
 		const PackedInt32Array selected = item_list->get_selected_items();
 		Array selected_items;
 		for (int i = 0; i < selected.size() && i < EditorSnapshotLimits::MAX_SELECTED_ITEMS; i++) {
@@ -310,18 +312,20 @@ public:
 		visited_nodes++;
 		const int remaining_budget = EditorSnapshotLimits::MAX_VISITED_NODES - visited_nodes;
 
+		// Children are read one index at a time rather than through get_children(), which would build a
+		// listing of every child before the budget above could bound it. get_child_count() is a counter
+		// read, so no container proportional to the child list is ever materialized.
 		std::unordered_set<uint64_t> public_children;
 		if (options.include_internal) {
-			const TypedArray<Node> visible_children = p_parent->get_children(false);
-			const int64_t visible_count = visible_children.size();
-			const int scanned = visible_count < (int64_t)remaining_budget ? (int)visible_count : remaining_budget;
+			const int32_t visible_count = p_parent->get_child_count(false);
+			const int scanned = visible_count < remaining_budget ? (int)visible_count : remaining_budget;
 			for (int i = 0; i < scanned; i++) {
-				Node *child = Object::cast_to<Node>(visible_children[i]);
+				Node *child = p_parent->get_child(i, false);
 				if (child != nullptr) {
 					public_children.insert((uint64_t)child->get_instance_id());
 				}
 			}
-			if ((int64_t)scanned < visible_count) {
+			if (scanned < visible_count) {
 				// An incomplete public listing cannot classify the remaining children, so stop here
 				// rather than publish a guess about which of them are internal.
 				data.traversal_limit_reached = true;
@@ -330,17 +334,16 @@ public:
 			}
 		}
 
-		const TypedArray<Node> children = p_parent->get_children(options.include_internal);
-		const int64_t child_count = children.size();
-		const int visitable = child_count < (int64_t)remaining_budget ? (int)child_count : remaining_budget;
-		if ((int64_t)visitable < child_count) {
+		const int32_t child_count = p_parent->get_child_count(options.include_internal);
+		const int visitable = child_count < remaining_budget ? (int)child_count : remaining_budget;
+		if (visitable < child_count) {
 			data.traversal_limit_reached = true;
 			r_truncated = true;
 		}
 		for (int i = 0; i < visitable; i++) {
-			// A node can leave the tree between the child listing and this read; skip it instead of
+			// A node can leave the tree between the count and this read; skip it instead of
 			// dereferencing a stale entry.
-			Node *child = Object::cast_to<Node>(children[i]);
+			Node *child = p_parent->get_child(i, options.include_internal);
 			if (child == nullptr) {
 				continue;
 			}
