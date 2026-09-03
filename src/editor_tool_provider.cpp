@@ -8,6 +8,7 @@
 
 #include "editor_tool_provider.h"
 
+#include "editor_automation_service.h"
 #include "mcp_contracts.h"
 #include "mcp_schema.h"
 
@@ -21,8 +22,10 @@
 
 namespace godot {
 
-void EditorToolProvider::configure(EditorInterface *p_editor_interface, const String &p_endpoint, int p_port) {
+void EditorToolProvider::configure(EditorInterface *p_editor_interface, EditorAutomationService *p_automation_service,
+		const String &p_endpoint, int p_port) {
 	editor_interface = p_editor_interface;
+	automation_service = p_automation_service;
 	endpoint = p_endpoint;
 	port = p_port;
 }
@@ -103,8 +106,22 @@ Dictionary EditorToolProvider::call(const String &p_name, const Dictionary &p_ar
 	Dictionary structured;
 	if (p_name == "barista_status") {
 		structured = status(p_initialized);
-	} else {
+	} else if (p_name == "get_project_info") {
 		structured = project_info();
+	} else if (p_name == "inspect_editor_ui") {
+		if (automation_service == nullptr) {
+			return _tool_error("unsupported_capability", "Editor automation is unavailable in this session.");
+		}
+		String automation_error;
+		String automation_message;
+		structured = automation_service->inspect_ui(p_arguments, automation_error, automation_message);
+		if (!automation_error.is_empty()) {
+			return _tool_error(automation_error, automation_message);
+		}
+	} else {
+		// An advertised tool without an implementation must fail closed rather than answer with
+		// another tool's payload.
+		return _tool_error("unsupported_capability", "Tool '" + p_name + "' has no implementation in this build.");
 	}
 
 	// The advertised outputSchema is a promise about structuredContent; never emit a payload that breaks it.

@@ -239,8 +239,9 @@ Dictionary MCPDispatcher::handle_message(const Dictionary &p_message, bool &r_ha
 	return _make_error(id, METHOD_NOT_FOUND, "Unknown method '" + method + "'.");
 }
 
-void MCPDispatcher::configure_tools(EditorInterface *p_editor_interface, const String &p_endpoint, int p_port) {
-	tool_provider.configure(p_editor_interface, p_endpoint, p_port);
+void MCPDispatcher::configure_tools(EditorInterface *p_editor_interface, EditorAutomationService *p_automation_service,
+		const String &p_endpoint, int p_port) {
+	tool_provider.configure(p_editor_interface, p_automation_service, p_endpoint, p_port);
 }
 
 bool MCPDispatcher::is_initialized() const {

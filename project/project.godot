@@ -10,7 +10,7 @@ config/features=PackedStringArray("4.7")
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/barista_mcp/plugin.cfg")
+enabled=PackedStringArray("res://addons/barista_mcp/plugin.cfg", "res://addons/barista_mcp_test_fixture/plugin.cfg")
 
 [rendering]
 

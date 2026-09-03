@@ -11,6 +11,8 @@
 #include <godot_cpp/core/math.hpp>
 #include <godot_cpp/variant/array.hpp>
 
+#include <cstdint>
+
 namespace godot {
 
 namespace {
@@ -22,6 +24,30 @@ Dictionary make_schema(const String &p_type, const String &p_description) {
 		schema["description"] = p_description;
 	}
 	return schema;
+}
+
+// The range an "integer" schema promises. JSON carries every number as a double, so a well-formed
+// integral number can still sit outside int64_t; converting such a value is undefined and diverges
+// between architectures (arm64 saturates, x86-64 yields INT64_MIN). The boundary rejects it instead.
+// -2^63 is exactly representable as a double; the largest double strictly below 2^63 is 2^63 - 1024.
+constexpr int64_t INTEGER_MINIMUM = -9223372036854775807LL - 1LL;
+constexpr int64_t INTEGER_MAXIMUM = 9223372036854774784LL;
+
+// Compares a validated numeric value against a schema bound without narrowing either side: integers
+// are compared as integers and floats as doubles.
+bool violates_bound(const Dictionary &p_schema, const String &p_key, const Variant &p_value, bool p_is_maximum) {
+	if (!p_schema.has(p_key)) {
+		return false;
+	}
+	const Variant bound = p_schema.get(p_key, Variant());
+	if (p_value.get_type() == Variant::INT && bound.get_type() == Variant::INT) {
+		const int64_t value = p_value;
+		const int64_t limit = bound;
+		return p_is_maximum ? value > limit : value < limit;
+	}
+	const double value = p_value;
+	const double limit = bound;
+	return p_is_maximum ? value > limit : value < limit;
 }
 
 bool matches_type(const String &p_type, const Variant &p_value, bool &r_known_type) {
@@ -60,8 +86,39 @@ bool matches_type(const String &p_type, const Variant &p_value, bool &r_known_ty
 	return false;
 }
 
-bool validate_against(const Dictionary &p_schema, const Variant &p_value, const String &p_path, String &r_error) {
-	const String type = p_schema.get("type", String());
+// Guards against a definition chain that never reaches a concrete schema.
+constexpr int MAX_REFERENCE_HOPS = 8;
+constexpr const char *DEFINITIONS_KEY = "$defs";
+constexpr const char *REFERENCE_PREFIX = "#/$defs/";
+
+bool validate_against(const Dictionary &p_root, const Dictionary &p_schema, const Variant &p_value,
+		const String &p_path, String &r_error) {
+	Dictionary schema = p_schema;
+	for (int hops = 0; schema.has("$ref"); hops++) {
+		if (hops >= MAX_REFERENCE_HOPS) {
+			r_error = "Schema for " + p_path + String(" has an unresolvable definition chain.");
+			return false;
+		}
+		const Variant reference = schema.get("$ref", Variant());
+		if (reference.get_type() != Variant::STRING) {
+			r_error = "Schema for " + p_path + String(" has a non-string '$ref'.");
+			return false;
+		}
+		const String pointer = reference;
+		if (!pointer.begins_with(REFERENCE_PREFIX)) {
+			r_error = "Schema for " + p_path + String(" references an unsupported pointer '") + pointer + "'.";
+			return false;
+		}
+		const String name = pointer.substr(String(REFERENCE_PREFIX).length());
+		const Dictionary definitions = p_root.get(DEFINITIONS_KEY, Dictionary());
+		if (!definitions.has(name)) {
+			r_error = "Schema for " + p_path + String(" references undefined '") + name + "'.";
+			return false;
+		}
+		schema = definitions.get(name, Dictionary());
+	}
+
+	const String type = schema.get("type", String());
 	if (!type.is_empty()) {
 		bool known_type = false;
 		if (!matches_type(type, p_value, known_type)) {
@@ -74,10 +131,15 @@ bool validate_against(const Dictionary &p_schema, const Variant &p_value, const 
 		}
 	}
 
+	if (violates_bound(schema, "minimum", p_value, false) || violates_bound(schema, "maximum", p_value, true)) {
+		r_error = p_path + String(" is outside the advertised numeric range.");
+		return false;
+	}
+
 	if (type == "object") {
 		const Dictionary value = p_value;
-		const Dictionary properties = p_schema.get("properties", Dictionary());
-		const Array required = p_schema.get("required", Array());
+		const Dictionary properties = schema.get("properties", Dictionary());
+		const Array required = schema.get("required", Array());
 		for (int i = 0; i < required.size(); i++) {
 			const String name = required[i];
 			if (!value.has(name)) {
@@ -85,7 +147,7 @@ bool validate_against(const Dictionary &p_schema, const Variant &p_value, const 
 				return false;
 			}
 		}
-		const bool allows_additional = p_schema.get("additionalProperties", true);
+		const bool allows_additional = schema.get("additionalProperties", true);
 		const Array keys = value.keys();
 		for (int i = 0; i < keys.size(); i++) {
 			const Variant key = keys[i];
@@ -102,18 +164,35 @@ bool validate_against(const Dictionary &p_schema, const Variant &p_value, const 
 				continue;
 			}
 			const Dictionary property_schema = properties.get(name, Dictionary());
-			if (!validate_against(property_schema, value.get(name, Variant()), p_path + String(".") + name, r_error)) {
+			if (!validate_against(
+						p_root, property_schema, value.get(name, Variant()), p_path + String(".") + name, r_error)) {
 				return false;
 			}
 		}
 		return true;
 	}
 
-	if (type == "array" && p_schema.has("items")) {
+	if (schema.has("enum")) {
+		const Array allowed = schema.get("enum", Array());
+		bool found = false;
+		for (int i = 0; i < allowed.size(); i++) {
+			if (allowed[i] == p_value) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			r_error = p_path + String(" must be one of the advertised enum values.");
+			return false;
+		}
+	}
+
+	if (type == "array" && schema.has("items")) {
 		const Array value = p_value;
-		const Dictionary items = p_schema.get("items", Dictionary());
+		const Dictionary items = schema.get("items", Dictionary());
 		for (int i = 0; i < value.size(); i++) {
-			if (!validate_against(items, value[i], p_path + String("[") + String::num_int64(i) + "]", r_error)) {
+			if (!validate_against(
+						p_root, items, value[i], p_path + String("[") + String::num_int64(i) + "]", r_error)) {
 				return false;
 			}
 		}
@@ -150,7 +229,11 @@ Dictionary MCPSchema::string(const String &p_description) {
 }
 
 Dictionary MCPSchema::integer(const String &p_description) {
-	return make_schema("integer", p_description);
+	Dictionary schema = make_schema("integer", p_description);
+	// Advertised, not implicit: a client can read the exact range this boundary accepts.
+	schema["minimum"] = INTEGER_MINIMUM;
+	schema["maximum"] = INTEGER_MAXIMUM;
+	return schema;
 }
 
 Dictionary MCPSchema::number(const String &p_description) {
@@ -159,6 +242,28 @@ Dictionary MCPSchema::number(const String &p_description) {
 
 Dictionary MCPSchema::boolean(const String &p_description) {
 	return make_schema("boolean", p_description);
+}
+
+Dictionary MCPSchema::enum_string(const PackedStringArray &p_values, const String &p_description) {
+	Dictionary schema = make_schema("string", p_description);
+	Array values;
+	for (int i = 0; i < p_values.size(); i++) {
+		values.push_back(p_values[i]);
+	}
+	schema["enum"] = values;
+	return schema;
+}
+
+Dictionary MCPSchema::reference(const String &p_definition_name) {
+	Dictionary schema;
+	schema["$ref"] = String(REFERENCE_PREFIX) + p_definition_name;
+	return schema;
+}
+
+void MCPSchema::add_definition(Dictionary &r_schema, const String &p_name, const Dictionary &p_definition) {
+	Dictionary definitions = r_schema.get(DEFINITIONS_KEY, Dictionary());
+	definitions[p_name] = p_definition;
+	r_schema[DEFINITIONS_KEY] = definitions;
 }
 
 void MCPSchema::add_property(
@@ -174,7 +279,7 @@ void MCPSchema::add_property(
 }
 
 bool MCPSchema::validate(const Dictionary &p_schema, const Variant &p_value, String &r_error) {
-	return validate_against(p_schema, p_value, "value", r_error);
+	return validate_against(p_schema, p_schema, p_value, "value", r_error);
 }
 
 } // namespace godot

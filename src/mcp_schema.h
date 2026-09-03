@@ -10,6 +10,7 @@
 #define BARISTA_MCP_SCHEMA_H
 
 #include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/variant.hpp>
 
@@ -26,6 +27,11 @@ public:
 	static Dictionary integer(const String &p_description = String());
 	static Dictionary number(const String &p_description = String());
 	static Dictionary boolean(const String &p_description = String());
+	// A closed string vocabulary. The advertised values are the values the validator accepts.
+	static Dictionary enum_string(const PackedStringArray &p_values, const String &p_description = String());
+	// A pointer to a named definition, so a recursive shape can be advertised and enforced once.
+	static Dictionary reference(const String &p_definition_name);
+	static void add_definition(Dictionary &r_schema, const String &p_name, const Dictionary &p_definition);
 	static void add_property(
 			Dictionary &r_schema, const String &p_name, const Dictionary &p_property, bool p_required = false);
 

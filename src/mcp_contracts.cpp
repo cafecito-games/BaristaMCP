@@ -8,6 +8,8 @@
 
 #include "mcp_contracts.h"
 
+#include "editor_automation_types.h"
+#include "editor_snapshot.h"
 #include "mcp_schema.h"
 
 #include <godot_cpp/variant/variant.hpp>
@@ -40,11 +42,91 @@ Dictionary project_output_schema() {
 	return schema;
 }
 
-Dictionary make_tool(const String &p_name, const String &p_description, const Dictionary &p_output_schema) {
+constexpr const char *UI_ELEMENT_DEFINITION = "ui_element";
+
+Dictionary ui_element_schema() {
+	Dictionary schema = MCPSchema::object("One semantic editor control or window.");
+	MCPSchema::add_property(schema, "id", MCPSchema::string("Snapshot-scoped element id."), true);
+	MCPSchema::add_property(
+			schema, "handle", MCPSchema::string("Durable opaque handle for stable public identity."), true);
+	MCPSchema::add_property(schema, "role",
+			MCPSchema::enum_string(EditorSnapshot::role_vocabulary(), "Semantic role of the element."), true);
+	MCPSchema::add_property(
+			schema, "name", MCPSchema::string("Accessibility name, text, tooltip, or node name."), true);
+	MCPSchema::add_property(schema, "text", MCPSchema::string("Bounded displayed or edited text."), true);
+	MCPSchema::add_property(schema, "class", MCPSchema::string("Public Godot class name."), true);
+	MCPSchema::add_property(schema, "path", MCPSchema::string("Bounded hierarchy path, for diagnostics only."), true);
+	MCPSchema::add_property(schema, "visible", MCPSchema::boolean("Whether the element is visible in the tree."), true);
+	MCPSchema::add_property(schema, "enabled", MCPSchema::boolean("Whether the element accepts interaction."), true);
+	MCPSchema::add_property(schema, "focused", MCPSchema::boolean("Whether the element currently holds focus."), true);
+	MCPSchema::add_property(schema, "internal",
+			MCPSchema::boolean("Whether the element is an internal child, visible only with include_internal."), true);
+	MCPSchema::add_property(schema, "truncated",
+			MCPSchema::boolean("Whether children were omitted because a published limit was reached."), true);
+	MCPSchema::add_property(schema, "bounds",
+			MCPSchema::array(MCPSchema::number(), "Bounds in the owning window as [x, y, width, height]."), true);
+	MCPSchema::add_property(schema, "actions",
+			MCPSchema::array(MCPSchema::enum_string(EditorSnapshot::action_vocabulary()),
+					"Actions this specific element can support through public APIs."),
+			true);
+	MCPSchema::add_property(schema, "state", MCPSchema::open_object("Bounded public state for this role."), true);
+	MCPSchema::add_property(schema, "children",
+			MCPSchema::array(MCPSchema::reference(UI_ELEMENT_DEFINITION), "Child elements, recursively."), true);
+	return schema;
+}
+
+Dictionary ui_snapshot_output_schema() {
+	Dictionary limits = MCPSchema::object("Limits applied to this capture.");
+	MCPSchema::add_property(limits, "max_depth", MCPSchema::integer("Clamped maximum traversal depth."), true);
+	MCPSchema::add_property(limits, "max_elements", MCPSchema::integer("Clamped maximum element budget."), true);
+	MCPSchema::add_property(limits, "max_elements_applied",
+			MCPSchema::integer("Element budget that produced this payload after size-driven truncation."), true);
+	MCPSchema::add_property(
+			limits, "include_internal", MCPSchema::boolean("Whether internal children were included."), true);
+	MCPSchema::add_property(
+			limits, "depth_truncated", MCPSchema::boolean("Whether any subtree was cut by max_depth."), true);
+	MCPSchema::add_property(limits, "element_limit_reached",
+			MCPSchema::boolean("Whether the element budget stopped the traversal."), true);
+	MCPSchema::add_property(limits, "traversal_limit_reached",
+			MCPSchema::boolean("Whether the absolute node-traversal depth stopped the traversal."), true);
+	MCPSchema::add_property(
+			limits, "payload_limit_bytes", MCPSchema::integer("Serialized payload budget in bytes."), true);
+
+	Dictionary schema = MCPSchema::object("Bounded semantic snapshot of the stock editor UI.");
+	MCPSchema::add_property(schema, "generation", MCPSchema::integer("Monotonic capture generation."), true);
+	MCPSchema::add_property(schema, "focused_element_id",
+			MCPSchema::string("Element id holding focus, or an empty string when none was captured."), true);
+	MCPSchema::add_property(schema, "element_count", MCPSchema::integer("Number of captured elements."), true);
+	MCPSchema::add_property(
+			schema, "truncated", MCPSchema::boolean("Whether any limit truncated this snapshot."), true);
+	MCPSchema::add_property(schema, "limits", limits, true);
+	// One recursive definition describes every element at every depth, so the advertised contract and
+	// the contract enforced against the tool's own output stay the same document.
+	MCPSchema::add_definition(schema, UI_ELEMENT_DEFINITION, ui_element_schema());
+	MCPSchema::add_property(schema, "tree",
+			MCPSchema::array(MCPSchema::reference(UI_ELEMENT_DEFINITION),
+					"Snapshot roots, starting at the editor base control."),
+			true);
+	return schema;
+}
+
+Dictionary ui_snapshot_input_schema() {
+	Dictionary schema = MCPSchema::object("Bounded options for one UI capture.");
+	MCPSchema::add_property(schema, "max_depth",
+			MCPSchema::integer("Maximum traversal depth; clamped to the documented range."), false);
+	MCPSchema::add_property(schema, "max_elements",
+			MCPSchema::integer("Maximum captured elements; clamped to the documented range."), false);
+	MCPSchema::add_property(schema, "include_internal",
+			MCPSchema::boolean("Include internal children, which are hidden by default."), false);
+	return schema;
+}
+
+Dictionary make_tool(const String &p_name, const String &p_description, const Dictionary &p_output_schema,
+		const Dictionary &p_input_schema = MCPSchema::object()) {
 	Dictionary tool;
 	tool["name"] = p_name;
 	tool["description"] = p_description;
-	tool["inputSchema"] = MCPSchema::object();
+	tool["inputSchema"] = p_input_schema;
 	tool["outputSchema"] = p_output_schema;
 	return tool;
 }
@@ -69,6 +151,9 @@ Array MCPContracts::build_tools_list() {
 			status_output_schema()));
 	tools.push_back(make_tool("get_project_info",
 			"Read stock Godot version, project, edited scene, and play-state information.", project_output_schema()));
+	tools.push_back(make_tool("inspect_editor_ui",
+			"Capture a bounded semantic snapshot of the stock Godot editor UI through public APIs.",
+			ui_snapshot_output_schema(), ui_snapshot_input_schema()));
 	return tools;
 }
 

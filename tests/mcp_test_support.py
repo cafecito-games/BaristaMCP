@@ -216,9 +216,18 @@ class MCPClient:
         return int(head.split(" ", 2)[1]), body
 
 
-def write_test_project(project_dir: Path, settings: str = "", *, config_name: str = "BaristaMCP Temporary Test") -> None:
+def write_test_project(
+    project_dir: Path,
+    settings: str = "",
+    *,
+    config_name: str = "BaristaMCP Temporary Test",
+    extra_plugins: tuple[str, ...] = (),
+) -> None:
     (project_dir / "addons").symlink_to(PROJECT_DIR / "addons", target_is_directory=True)
     (project_dir / "bin").symlink_to(PROJECT_DIR / "bin", target_is_directory=True)
+    plugins = ", ".join(
+        f'"res://addons/{name}/plugin.cfg"' for name in ("barista_mcp", *extra_plugins)
+    )
     (project_dir / "project.godot").write_text(
         f"""config_version=5
 
@@ -229,7 +238,7 @@ config/features=PackedStringArray("4.7")
 {settings}
 
 [editor_plugins]
-enabled=PackedStringArray("res://addons/barista_mcp/plugin.cfg")
+enabled=PackedStringArray({plugins})
 """,
         encoding="utf-8",
     )

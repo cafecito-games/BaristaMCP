@@ -11,6 +11,7 @@
 
 #include <godot_cpp/classes/editor_plugin.hpp>
 
+#include "editor_automation_service.h"
 #include "mcp_server.h"
 
 namespace godot {
@@ -18,6 +19,7 @@ namespace godot {
 class BaristaMCPPlugin : public EditorPlugin {
 	GDCLASS(BaristaMCPPlugin, EditorPlugin)
 
+	EditorAutomationService automation_service;
 	MCPServer server;
 
 	void _define_project_settings();

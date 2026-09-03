@@ -17,6 +17,8 @@
 
 namespace godot {
 
+class EditorAutomationService;
+
 class MCPDispatcher {
 	enum LifecycleState {
 		UNINITIALIZED,
@@ -43,7 +45,8 @@ public:
 	};
 
 	Dictionary handle_message(const Dictionary &p_message, bool &r_has_response);
-	void configure_tools(EditorInterface *p_editor_interface, const String &p_endpoint, int p_port);
+	void configure_tools(EditorInterface *p_editor_interface, EditorAutomationService *p_automation_service,
+			const String &p_endpoint, int p_port);
 	bool is_initialized() const;
 	void reset();
 };
