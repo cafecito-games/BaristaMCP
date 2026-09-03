@@ -1,15 +1,34 @@
 {
   "enabled_classes": [
+    "BaseButton",
+    "Button",
+    "CanvasItem",
+    "CheckBox",
+    "Control",
     "Crypto",
     "EditorInterface",
     "EditorPlugin",
     "Engine",
+    "ItemList",
     "JSON",
+    "Label",
+    "LineEdit",
     "Marshalls",
+    "Node",
     "OS",
+    "OptionButton",
+    "PopupMenu",
     "ProjectSettings",
+    "Range",
+    "RichTextLabel",
+    "SpinBox",
     "StreamPeerTCP",
     "TCPServer",
-    "Time"
+    "TabBar",
+    "TabContainer",
+    "TextEdit",
+    "Time",
+    "Tree",
+    "Window"
   ]
 }

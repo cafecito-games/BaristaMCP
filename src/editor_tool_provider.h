@@ -14,10 +14,12 @@
 
 namespace godot {
 
+class EditorAutomationService;
 class EditorInterface;
 
 class EditorToolProvider {
 	EditorInterface *editor_interface = nullptr;
+	EditorAutomationService *automation_service = nullptr;
 	String endpoint;
 	int port = 0;
 
@@ -25,7 +27,8 @@ class EditorToolProvider {
 	static Dictionary _tool_error(const String &p_error, const String &p_message);
 
 public:
-	void configure(EditorInterface *p_editor_interface, const String &p_endpoint, int p_port);
+	void configure(EditorInterface *p_editor_interface, EditorAutomationService *p_automation_service,
+			const String &p_endpoint, int p_port);
 	Dictionary call(const String &p_name, const Dictionary &p_arguments, bool p_initialized) const;
 
 	Dictionary status(bool p_initialized) const;

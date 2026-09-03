@@ -1,0 +1,482 @@
+/**************************************************************************/
+/*  editor_snapshot.cpp                                                   */
+/*                                                                        */
+/*  Copyright (c) 2026-present Cafecito Games LLC.                        */
+/*  This file is part of BaristaMCP, a Godot GDExtension.                 */
+/*  SPDX-License-Identifier: MIT                                          */
+/**************************************************************************/
+
+#include "editor_snapshot.h"
+
+#include <godot_cpp/classes/base_button.hpp>
+#include <godot_cpp/classes/button.hpp>
+#include <godot_cpp/classes/control.hpp>
+#include <godot_cpp/classes/editor_interface.hpp>
+#include <godot_cpp/classes/item_list.hpp>
+#include <godot_cpp/classes/label.hpp>
+#include <godot_cpp/classes/line_edit.hpp>
+#include <godot_cpp/classes/node.hpp>
+#include <godot_cpp/classes/option_button.hpp>
+#include <godot_cpp/classes/popup_menu.hpp>
+#include <godot_cpp/classes/range.hpp>
+#include <godot_cpp/classes/rich_text_label.hpp>
+#include <godot_cpp/classes/spin_box.hpp>
+#include <godot_cpp/classes/tab_bar.hpp>
+#include <godot_cpp/classes/tab_container.hpp>
+#include <godot_cpp/classes/text_edit.hpp>
+#include <godot_cpp/classes/window.hpp>
+#include <godot_cpp/variant/array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
+#include <godot_cpp/variant/typed_array.hpp>
+#include <godot_cpp/variant/variant.hpp>
+
+#include <unordered_set>
+
+namespace godot {
+
+namespace {
+
+// Documented public control types mapped to Barista roles, most derived first. Any control that
+// matches no rule is reported as the generic "control" role rather than guessing semantics.
+struct RoleRule {
+	const char *class_name;
+	const char *role;
+};
+
+const RoleRule ROLE_RULES[] = {
+		{"CheckBox", "checkbox"},
+		{"CheckButton", "checkbox"},
+		{"OptionButton", "option_button"},
+		{"MenuButton", "menu_button"},
+		{"LinkButton", "button"},
+		{"Button", "button"},
+		{"BaseButton", "button"},
+		{"CodeEdit", "code_editor"},
+		{"TextEdit", "text_area"},
+		{"LineEdit", "text_field"},
+		{"RichTextLabel", "label"},
+		{"Label", "label"},
+		{"Tree", "tree"},
+		{"ItemList", "list"},
+		{"SpinBox", "spin_box"},
+		{"Slider", "slider"},
+		{"ProgressBar", "progress_bar"},
+		{"TabContainer", "tab_container"},
+		{"TabBar", "tab_bar"},
+		{"PopupMenu", "menu"},
+		{"ScrollContainer", "scroll_container"},
+		{"SubViewportContainer", "viewport_container"},
+		{"AcceptDialog", "dialog"},
+		{"Window", "window"},
+		{"Control", "control"},
+};
+
+// Actions a role can support through documented public APIs. Element-level state narrows this set;
+// it is never widened.
+struct ActionRule {
+	const char *role;
+	const char *actions[5];
+};
+
+const ActionRule ACTION_RULES[] = {
+		{"button", {"click", "focus", nullptr, nullptr, nullptr}},
+		{"checkbox", {"click", "focus", "set_checked", nullptr, nullptr}},
+		{"option_button", {"click", "focus", nullptr, nullptr, nullptr}},
+		{"menu_button", {"click", "focus", nullptr, nullptr, nullptr}},
+		{"text_field", {"focus", "set_text", "type_text", "submit", nullptr}},
+		{"text_area", {"focus", "set_text", "type_text", nullptr, nullptr}},
+		{"code_editor", {"focus", "set_text", "type_text", nullptr, nullptr}},
+		{"spin_box", {"focus", "set_value", nullptr, nullptr, nullptr}},
+		{"slider", {"focus", "set_value", nullptr, nullptr, nullptr}},
+		{"list", {"focus", "select_item", nullptr, nullptr, nullptr}},
+		{"tree", {"focus", "select_item", nullptr, nullptr, nullptr}},
+		{"tab_container", {"focus", "select_tab", nullptr, nullptr, nullptr}},
+		{"tab_bar", {"focus", "select_tab", nullptr, nullptr, nullptr}},
+		{"scroll_container", {"scroll", nullptr, nullptr, nullptr, nullptr}},
+};
+
+String bounded(const String &p_value, int p_limit) {
+	if (p_value.length() <= p_limit) {
+		return p_value;
+	}
+	return p_value.substr(0, p_limit);
+}
+
+String role_for(Object *p_object) {
+	for (const RoleRule &rule : ROLE_RULES) {
+		if (p_object->is_class(rule.class_name)) {
+			return rule.role;
+		}
+	}
+	return "control";
+}
+
+PackedStringArray actions_for(const String &p_role, bool p_enabled, bool p_focusable) {
+	PackedStringArray actions;
+	if (!p_enabled) {
+		return actions;
+	}
+	for (const ActionRule &rule : ACTION_RULES) {
+		if (p_role != rule.role) {
+			continue;
+		}
+		for (const char *action : rule.actions) {
+			if (action == nullptr) {
+				break;
+			}
+			if (!p_focusable && String(action) == "focus") {
+				continue;
+			}
+			actions.push_back(action);
+		}
+		break;
+	}
+	return actions;
+}
+
+// Names prefer the public accessibility name, then displayed text or a window title, then the
+// tooltip, and only then the node name. Editable text is deliberately excluded because it changes
+// as the editor is used.
+String display_text(Control *p_control, const String &p_role) {
+	if (p_role == "text_field") {
+		LineEdit *line_edit = Object::cast_to<LineEdit>(p_control);
+		return line_edit != nullptr ? line_edit->get_text() : String();
+	}
+	if (p_role == "text_area" || p_role == "code_editor") {
+		TextEdit *text_edit = Object::cast_to<TextEdit>(p_control);
+		return text_edit != nullptr ? text_edit->get_text() : String();
+	}
+	Button *button = Object::cast_to<Button>(p_control);
+	if (button != nullptr) {
+		return button->get_text();
+	}
+	Label *label = Object::cast_to<Label>(p_control);
+	if (label != nullptr) {
+		return label->get_text();
+	}
+	RichTextLabel *rich_label = Object::cast_to<RichTextLabel>(p_control);
+	if (rich_label != nullptr) {
+		return rich_label->get_text();
+	}
+	return String();
+}
+
+bool text_is_a_name(const String &p_role) {
+	return p_role != "text_field" && p_role != "text_area" && p_role != "code_editor";
+}
+
+Dictionary control_state(Control *p_control, const String &p_role) {
+	Dictionary state;
+	BaseButton *base_button = Object::cast_to<BaseButton>(p_control);
+	if (base_button != nullptr) {
+		state["pressed"] = base_button->is_pressed();
+		state["toggle_mode"] = base_button->is_toggle_mode();
+	}
+	OptionButton *option_button = Object::cast_to<OptionButton>(p_control);
+	if (option_button != nullptr) {
+		state["selected_index"] = option_button->get_selected();
+		state["item_count"] = option_button->get_item_count();
+	}
+	LineEdit *line_edit = Object::cast_to<LineEdit>(p_control);
+	if (line_edit != nullptr && p_role == "text_field") {
+		state["editable"] = line_edit->is_editable();
+		state["text_length"] = line_edit->get_text().length();
+	}
+	TextEdit *text_edit = Object::cast_to<TextEdit>(p_control);
+	if (text_edit != nullptr) {
+		state["editable"] = text_edit->is_editable();
+		state["text_length"] = text_edit->get_text().length();
+	}
+	Range *range = Object::cast_to<Range>(p_control);
+	SpinBox *spin_box = Object::cast_to<SpinBox>(p_control);
+	if (range != nullptr || spin_box != nullptr) {
+		Range *value_source = range;
+		if (value_source == nullptr) {
+			value_source = spin_box;
+		}
+		state["value"] = value_source->get_value();
+		state["min_value"] = value_source->get_min();
+		state["max_value"] = value_source->get_max();
+		state["step"] = value_source->get_step();
+	}
+	ItemList *item_list = Object::cast_to<ItemList>(p_control);
+	if (item_list != nullptr) {
+		state["item_count"] = item_list->get_item_count();
+		const PackedInt32Array selected = item_list->get_selected_items();
+		Array selected_items;
+		for (int i = 0; i < selected.size() && i < EditorSnapshotLimits::MAX_SELECTED_ITEMS; i++) {
+			selected_items.push_back(selected[i]);
+		}
+		state["selected_items"] = selected_items;
+	}
+	TabContainer *tab_container = Object::cast_to<TabContainer>(p_control);
+	if (tab_container != nullptr) {
+		state["tab_count"] = tab_container->get_tab_count();
+		state["current_tab"] = tab_container->get_current_tab();
+	}
+	TabBar *tab_bar = Object::cast_to<TabBar>(p_control);
+	if (tab_bar != nullptr) {
+		state["tab_count"] = tab_bar->get_tab_count();
+		state["current_tab"] = tab_bar->get_current_tab();
+	}
+	PopupMenu *popup_menu = Object::cast_to<PopupMenu>(p_control);
+	if (popup_menu != nullptr) {
+		state["item_count"] = popup_menu->get_item_count();
+	}
+	return state;
+}
+
+bool control_is_enabled(Control *p_control) {
+	BaseButton *base_button = Object::cast_to<BaseButton>(p_control);
+	if (base_button != nullptr) {
+		return !base_button->is_disabled();
+	}
+	SpinBox *spin_box = Object::cast_to<SpinBox>(p_control);
+	if (spin_box != nullptr) {
+		return spin_box->is_editable();
+	}
+	LineEdit *line_edit = Object::cast_to<LineEdit>(p_control);
+	if (line_edit != nullptr) {
+		return line_edit->is_editable();
+	}
+	TextEdit *text_edit = Object::cast_to<TextEdit>(p_control);
+	if (text_edit != nullptr) {
+		return text_edit->is_editable();
+	}
+	return true;
+}
+
+class SnapshotBuilder {
+	const EditorSnapshotOptions &options;
+	EditorSnapshotData &data;
+
+public:
+	SnapshotBuilder(const EditorSnapshotOptions &p_options, EditorSnapshotData &r_data)
+			: options(p_options), data(r_data) {}
+
+	// Collects the emitted descendants of p_parent. Nodes that are neither controls nor windows are
+	// transparent: their children are collected at the same depth so no public control is lost.
+	void collect_children(Node *p_parent, int p_depth, std::vector<EditorElement> &r_children, const String &p_path,
+			bool &r_truncated) {
+		if (p_parent == nullptr) {
+			return;
+		}
+		std::unordered_set<uint64_t> public_children;
+		if (options.include_internal) {
+			const TypedArray<Node> visible_children = p_parent->get_children(false);
+			for (int i = 0; i < visible_children.size(); i++) {
+				Node *child = Object::cast_to<Node>(visible_children[i]);
+				if (child != nullptr) {
+					public_children.insert((uint64_t)child->get_instance_id());
+				}
+			}
+		}
+
+		const TypedArray<Node> children = p_parent->get_children(options.include_internal);
+		for (int i = 0; i < children.size(); i++) {
+			// A node can leave the tree between the child listing and this read; skip it instead of
+			// dereferencing a stale entry.
+			Node *child = Object::cast_to<Node>(children[i]);
+			if (child == nullptr) {
+				continue;
+			}
+			const bool is_internal = options.include_internal &&
+					public_children.find((uint64_t)child->get_instance_id()) == public_children.end();
+			add_node(child, p_depth, r_children, p_path, is_internal, r_truncated);
+			if (data.element_limit_reached) {
+				r_truncated = true;
+				return;
+			}
+		}
+	}
+
+	void add_node(Node *p_node, int p_depth, std::vector<EditorElement> &r_children, const String &p_path,
+			bool p_internal, bool &r_truncated) {
+		Control *control = Object::cast_to<Control>(p_node);
+		Window *window = Object::cast_to<Window>(p_node);
+		if (control == nullptr && window == nullptr) {
+			collect_children(p_node, p_depth, r_children, p_path, r_truncated);
+			return;
+		}
+		if (control != nullptr && !control->is_visible_in_tree()) {
+			return;
+		}
+		if (window != nullptr && !window->is_visible()) {
+			return;
+		}
+		if (data.element_count >= options.max_elements) {
+			data.element_limit_reached = true;
+			r_truncated = true;
+			return;
+		}
+
+		EditorElement element;
+		const uint64_t instance_id = (uint64_t)p_node->get_instance_id();
+		element.handle = "el:" + String::num_uint64(instance_id);
+		element.id = "s" + String::num_uint64(data.generation) + ":" + String::num_uint64(instance_id);
+		element.class_name = p_node->get_class();
+		element.internal = p_internal;
+		element.path =
+				bounded(p_path + String("/") + String(p_node->get_name()), EditorSnapshotLimits::MAX_PATH_LENGTH);
+
+		if (control != nullptr) {
+			element.role = role_for(control);
+			const String text = display_text(control, element.role);
+			element.text = bounded(text, EditorSnapshotLimits::MAX_STRING_LENGTH);
+			String name = control->get_accessibility_name();
+			if (name.is_empty() && text_is_a_name(element.role)) {
+				name = text;
+			}
+			if (name.is_empty()) {
+				name = control->get_tooltip_text();
+			}
+			if (name.is_empty()) {
+				name = String(p_node->get_name());
+			}
+			element.name = bounded(name, EditorSnapshotLimits::MAX_STRING_LENGTH);
+			element.visible = true;
+			element.enabled = control_is_enabled(control);
+			element.focused = control->has_focus();
+			element.bounds = control->get_global_rect();
+			element.state = control_state(control, element.role);
+			element.actions =
+					actions_for(element.role, element.enabled, control->get_focus_mode() != Control::FOCUS_NONE);
+		} else {
+			element.role = role_for(window);
+			String name = window->get_title();
+			if (name.is_empty()) {
+				name = String(p_node->get_name());
+			}
+			element.name = bounded(name, EditorSnapshotLimits::MAX_STRING_LENGTH);
+			element.text = bounded(window->get_title(), EditorSnapshotLimits::MAX_STRING_LENGTH);
+			element.visible = true;
+			element.bounds = Rect2(window->get_position(), window->get_size());
+			Dictionary state;
+			state["title"] = element.text;
+			element.state = state;
+		}
+
+		data.element_count++;
+		if (element.focused) {
+			data.focused_element_id = element.id;
+		}
+
+		if (p_depth + 1 >= options.max_depth) {
+			if (p_node->get_child_count(options.include_internal) > 0) {
+				element.truncated = true;
+				data.depth_truncated = true;
+			}
+		} else {
+			bool child_truncated = false;
+			collect_children(p_node, p_depth + 1, element.children, element.path, child_truncated);
+			element.truncated = child_truncated;
+		}
+		r_children.push_back(element);
+	}
+};
+
+Array serialize_elements(const std::vector<EditorElement> &p_elements) {
+	Array serialized;
+	for (const EditorElement &element : p_elements) {
+		Dictionary entry;
+		entry["id"] = element.id;
+		entry["handle"] = element.handle;
+		entry["role"] = element.role;
+		entry["name"] = element.name;
+		entry["text"] = element.text;
+		entry["class"] = element.class_name;
+		entry["path"] = element.path;
+		entry["visible"] = element.visible;
+		entry["enabled"] = element.enabled;
+		entry["focused"] = element.focused;
+		entry["internal"] = element.internal;
+		entry["truncated"] = element.truncated;
+		Array bounds;
+		bounds.push_back(element.bounds.position.x);
+		bounds.push_back(element.bounds.position.y);
+		bounds.push_back(element.bounds.size.x);
+		bounds.push_back(element.bounds.size.y);
+		entry["bounds"] = bounds;
+		Array actions;
+		for (int i = 0; i < element.actions.size(); i++) {
+			actions.push_back(element.actions[i]);
+		}
+		entry["actions"] = actions;
+		entry["state"] = element.state;
+		entry["children"] = serialize_elements(element.children);
+		serialized.push_back(entry);
+	}
+	return serialized;
+}
+
+} // namespace
+
+PackedStringArray EditorSnapshot::role_vocabulary() {
+	PackedStringArray roles;
+	for (const RoleRule &rule : ROLE_RULES) {
+		if (!roles.has(rule.role)) {
+			roles.push_back(rule.role);
+		}
+	}
+	return roles;
+}
+
+PackedStringArray EditorSnapshot::action_vocabulary() {
+	PackedStringArray actions;
+	for (const ActionRule &rule : ACTION_RULES) {
+		for (const char *action : rule.actions) {
+			if (action == nullptr) {
+				break;
+			}
+			if (!actions.has(action)) {
+				actions.push_back(action);
+			}
+		}
+	}
+	return actions;
+}
+
+bool EditorSnapshot::capture(EditorInterface *p_editor_interface, uint64_t p_generation,
+		const EditorSnapshotOptions &p_options, EditorSnapshotData &r_data) {
+	if (p_editor_interface == nullptr) {
+		return false;
+	}
+	Control *base_control = p_editor_interface->get_base_control();
+	if (base_control == nullptr) {
+		return false;
+	}
+
+	r_data = EditorSnapshotData();
+	r_data.generation = p_generation;
+	r_data.applied_options = p_options;
+
+	SnapshotBuilder builder(p_options, r_data);
+	bool truncated = false;
+	std::vector<EditorElement> roots;
+	// The base control is the single snapshot root, so every element hangs off one stable public node.
+	builder.add_node(base_control, 0, roots, String(), false, truncated);
+	r_data.roots = roots;
+	return true;
+}
+
+Dictionary EditorSnapshot::serialize(const EditorSnapshotData &p_data) {
+	Dictionary limits;
+	limits["max_depth"] = p_data.requested_options.max_depth;
+	limits["max_elements"] = p_data.requested_options.max_elements;
+	limits["max_elements_applied"] = p_data.applied_options.max_elements;
+	limits["include_internal"] = p_data.requested_options.include_internal;
+	limits["depth_truncated"] = p_data.depth_truncated;
+	limits["element_limit_reached"] = p_data.element_limit_reached;
+	limits["payload_limit_bytes"] = EditorSnapshotLimits::MAX_PAYLOAD_BYTES;
+
+	Dictionary snapshot;
+	snapshot["generation"] = (int64_t)p_data.generation;
+	snapshot["focused_element_id"] = p_data.focused_element_id;
+	snapshot["element_count"] = p_data.element_count;
+	snapshot["truncated"] = p_data.depth_truncated || p_data.element_limit_reached;
+	snapshot["limits"] = limits;
+	snapshot["tree"] = serialize_elements(p_data.roots);
+	return snapshot;
+}
+
+} // namespace godot

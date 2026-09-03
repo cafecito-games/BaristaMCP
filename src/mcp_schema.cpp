@@ -109,6 +109,21 @@ bool validate_against(const Dictionary &p_schema, const Variant &p_value, const 
 		return true;
 	}
 
+	if (p_schema.has("enum")) {
+		const Array allowed = p_schema.get("enum", Array());
+		bool found = false;
+		for (int i = 0; i < allowed.size(); i++) {
+			if (allowed[i] == p_value) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			r_error = p_path + String(" must be one of the advertised enum values.");
+			return false;
+		}
+	}
+
 	if (type == "array" && p_schema.has("items")) {
 		const Array value = p_value;
 		const Dictionary items = p_schema.get("items", Dictionary());
@@ -159,6 +174,16 @@ Dictionary MCPSchema::number(const String &p_description) {
 
 Dictionary MCPSchema::boolean(const String &p_description) {
 	return make_schema("boolean", p_description);
+}
+
+Dictionary MCPSchema::enum_string(const PackedStringArray &p_values, const String &p_description) {
+	Dictionary schema = make_schema("string", p_description);
+	Array values;
+	for (int i = 0; i < p_values.size(); i++) {
+		values.push_back(p_values[i]);
+	}
+	schema["enum"] = values;
+	return schema;
 }
 
 void MCPSchema::add_property(

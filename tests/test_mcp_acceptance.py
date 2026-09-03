@@ -179,10 +179,12 @@ class BaristaMCPAcceptanceTests(unittest.TestCase):
             listed = client.rpc("tools/list", {})
             self.assertIn("result", listed, listed)
             tools = listed["result"]["tools"]
-            self.assertEqual([tool["name"] for tool in tools], ["barista_status", "get_project_info"])
+            self.assertEqual(
+                [tool["name"] for tool in tools],
+                ["barista_status", "get_project_info", "inspect_editor_ui"],
+            )
             for tool in tools:
                 self.assertEqual(tool["inputSchema"]["type"], "object")
-                self.assertEqual(tool["inputSchema"]["properties"], {})
                 self.assertEqual(tool["inputSchema"]["required"], [])
                 self.assertIs(tool["inputSchema"]["additionalProperties"], False)
 

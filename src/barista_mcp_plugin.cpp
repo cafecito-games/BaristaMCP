@@ -72,7 +72,9 @@ void BaristaMCPPlugin::_start_server() {
 		return;
 	}
 
+	automation_service.configure(get_editor_interface());
 	server.set_editor_interface(get_editor_interface());
+	server.set_automation_service(&automation_service);
 	const Error error = server.start((uint16_t)port, (uint64_t)request_timeout_ms, (int)max_request_bytes);
 	if (error != OK) {
 		UtilityFunctions::printerr("BaristaMCP: failed to bind MCP server (error ", (int)error, ").");
@@ -96,10 +98,11 @@ void BaristaMCPPlugin::_enter_tree() {
 void BaristaMCPPlugin::_exit_tree() {
 	set_process(false);
 	server.stop();
+	automation_service.shutdown();
 }
 
 void BaristaMCPPlugin::_process(double p_delta) {
-	(void)p_delta;
+	automation_service.process(p_delta);
 	server.poll();
 }
 
