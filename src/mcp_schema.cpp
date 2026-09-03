@@ -60,8 +60,39 @@ bool matches_type(const String &p_type, const Variant &p_value, bool &r_known_ty
 	return false;
 }
 
-bool validate_against(const Dictionary &p_schema, const Variant &p_value, const String &p_path, String &r_error) {
-	const String type = p_schema.get("type", String());
+// Guards against a definition chain that never reaches a concrete schema.
+constexpr int MAX_REFERENCE_HOPS = 8;
+constexpr const char *DEFINITIONS_KEY = "$defs";
+constexpr const char *REFERENCE_PREFIX = "#/$defs/";
+
+bool validate_against(const Dictionary &p_root, const Dictionary &p_schema, const Variant &p_value,
+		const String &p_path, String &r_error) {
+	Dictionary schema = p_schema;
+	for (int hops = 0; schema.has("$ref"); hops++) {
+		if (hops >= MAX_REFERENCE_HOPS) {
+			r_error = "Schema for " + p_path + String(" has an unresolvable definition chain.");
+			return false;
+		}
+		const Variant reference = schema.get("$ref", Variant());
+		if (reference.get_type() != Variant::STRING) {
+			r_error = "Schema for " + p_path + String(" has a non-string '$ref'.");
+			return false;
+		}
+		const String pointer = reference;
+		if (!pointer.begins_with(REFERENCE_PREFIX)) {
+			r_error = "Schema for " + p_path + String(" references an unsupported pointer '") + pointer + "'.";
+			return false;
+		}
+		const String name = pointer.substr(String(REFERENCE_PREFIX).length());
+		const Dictionary definitions = p_root.get(DEFINITIONS_KEY, Dictionary());
+		if (!definitions.has(name)) {
+			r_error = "Schema for " + p_path + String(" references undefined '") + name + "'.";
+			return false;
+		}
+		schema = definitions.get(name, Dictionary());
+	}
+
+	const String type = schema.get("type", String());
 	if (!type.is_empty()) {
 		bool known_type = false;
 		if (!matches_type(type, p_value, known_type)) {
@@ -76,8 +107,8 @@ bool validate_against(const Dictionary &p_schema, const Variant &p_value, const 
 
 	if (type == "object") {
 		const Dictionary value = p_value;
-		const Dictionary properties = p_schema.get("properties", Dictionary());
-		const Array required = p_schema.get("required", Array());
+		const Dictionary properties = schema.get("properties", Dictionary());
+		const Array required = schema.get("required", Array());
 		for (int i = 0; i < required.size(); i++) {
 			const String name = required[i];
 			if (!value.has(name)) {
@@ -85,7 +116,7 @@ bool validate_against(const Dictionary &p_schema, const Variant &p_value, const 
 				return false;
 			}
 		}
-		const bool allows_additional = p_schema.get("additionalProperties", true);
+		const bool allows_additional = schema.get("additionalProperties", true);
 		const Array keys = value.keys();
 		for (int i = 0; i < keys.size(); i++) {
 			const Variant key = keys[i];
@@ -102,15 +133,16 @@ bool validate_against(const Dictionary &p_schema, const Variant &p_value, const 
 				continue;
 			}
 			const Dictionary property_schema = properties.get(name, Dictionary());
-			if (!validate_against(property_schema, value.get(name, Variant()), p_path + String(".") + name, r_error)) {
+			if (!validate_against(
+						p_root, property_schema, value.get(name, Variant()), p_path + String(".") + name, r_error)) {
 				return false;
 			}
 		}
 		return true;
 	}
 
-	if (p_schema.has("enum")) {
-		const Array allowed = p_schema.get("enum", Array());
+	if (schema.has("enum")) {
+		const Array allowed = schema.get("enum", Array());
 		bool found = false;
 		for (int i = 0; i < allowed.size(); i++) {
 			if (allowed[i] == p_value) {
@@ -124,11 +156,12 @@ bool validate_against(const Dictionary &p_schema, const Variant &p_value, const 
 		}
 	}
 
-	if (type == "array" && p_schema.has("items")) {
+	if (type == "array" && schema.has("items")) {
 		const Array value = p_value;
-		const Dictionary items = p_schema.get("items", Dictionary());
+		const Dictionary items = schema.get("items", Dictionary());
 		for (int i = 0; i < value.size(); i++) {
-			if (!validate_against(items, value[i], p_path + String("[") + String::num_int64(i) + "]", r_error)) {
+			if (!validate_against(
+						p_root, items, value[i], p_path + String("[") + String::num_int64(i) + "]", r_error)) {
 				return false;
 			}
 		}
@@ -186,6 +219,18 @@ Dictionary MCPSchema::enum_string(const PackedStringArray &p_values, const Strin
 	return schema;
 }
 
+Dictionary MCPSchema::reference(const String &p_definition_name) {
+	Dictionary schema;
+	schema["$ref"] = String(REFERENCE_PREFIX) + p_definition_name;
+	return schema;
+}
+
+void MCPSchema::add_definition(Dictionary &r_schema, const String &p_name, const Dictionary &p_definition) {
+	Dictionary definitions = r_schema.get(DEFINITIONS_KEY, Dictionary());
+	definitions[p_name] = p_definition;
+	r_schema[DEFINITIONS_KEY] = definitions;
+}
+
 void MCPSchema::add_property(
 		Dictionary &r_schema, const String &p_name, const Dictionary &p_property, bool p_required) {
 	Dictionary properties = r_schema.get("properties", Dictionary());
@@ -199,7 +244,7 @@ void MCPSchema::add_property(
 }
 
 bool MCPSchema::validate(const Dictionary &p_schema, const Variant &p_value, String &r_error) {
-	return validate_against(p_schema, p_value, "value", r_error);
+	return validate_against(p_schema, p_schema, p_value, "value", r_error);
 }
 
 } // namespace godot

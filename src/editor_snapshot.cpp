@@ -8,6 +8,7 @@
 
 #include "editor_snapshot.h"
 
+#include <godot_cpp/classes/accept_dialog.hpp>
 #include <godot_cpp/classes/base_button.hpp>
 #include <godot_cpp/classes/button.hpp>
 #include <godot_cpp/classes/control.hpp>
@@ -15,11 +16,14 @@
 #include <godot_cpp/classes/item_list.hpp>
 #include <godot_cpp/classes/label.hpp>
 #include <godot_cpp/classes/line_edit.hpp>
+#include <godot_cpp/classes/link_button.hpp>
+#include <godot_cpp/classes/menu_button.hpp>
 #include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/classes/option_button.hpp>
 #include <godot_cpp/classes/popup_menu.hpp>
 #include <godot_cpp/classes/range.hpp>
 #include <godot_cpp/classes/rich_text_label.hpp>
+#include <godot_cpp/classes/slider.hpp>
 #include <godot_cpp/classes/spin_box.hpp>
 #include <godot_cpp/classes/tab_bar.hpp>
 #include <godot_cpp/classes/tab_container.hpp>
@@ -150,6 +154,11 @@ String display_text(Control *p_control, const String &p_role) {
 	if (button != nullptr) {
 		return button->get_text();
 	}
+	// LinkButton is a sibling of Button under BaseButton, so its label needs its own accessor.
+	LinkButton *link_button = Object::cast_to<LinkButton>(p_control);
+	if (link_button != nullptr) {
+		return link_button->get_text();
+	}
 	Label *label = Object::cast_to<Label>(p_control);
 	if (label != nullptr) {
 		return label->get_text();
@@ -177,6 +186,10 @@ Dictionary control_state(Control *p_control, const String &p_role) {
 		state["selected_index"] = option_button->get_selected();
 		state["item_count"] = option_button->get_item_count();
 	}
+	MenuButton *menu_button = Object::cast_to<MenuButton>(p_control);
+	if (menu_button != nullptr) {
+		state["item_count"] = menu_button->get_item_count();
+	}
 	LineEdit *line_edit = Object::cast_to<LineEdit>(p_control);
 	if (line_edit != nullptr && p_role == "text_field") {
 		state["editable"] = line_edit->is_editable();
@@ -187,17 +200,13 @@ Dictionary control_state(Control *p_control, const String &p_role) {
 		state["editable"] = text_edit->is_editable();
 		state["text_length"] = text_edit->get_text().length();
 	}
+	// SpinBox, sliders, and progress bars all derive from Range, so one accessor covers them.
 	Range *range = Object::cast_to<Range>(p_control);
-	SpinBox *spin_box = Object::cast_to<SpinBox>(p_control);
-	if (range != nullptr || spin_box != nullptr) {
-		Range *value_source = range;
-		if (value_source == nullptr) {
-			value_source = spin_box;
-		}
-		state["value"] = value_source->get_value();
-		state["min_value"] = value_source->get_min();
-		state["max_value"] = value_source->get_max();
-		state["step"] = value_source->get_step();
+	if (range != nullptr) {
+		state["value"] = range->get_value();
+		state["min_value"] = range->get_min();
+		state["max_value"] = range->get_max();
+		state["step"] = range->get_step();
 	}
 	ItemList *item_list = Object::cast_to<ItemList>(p_control);
 	if (item_list != nullptr) {
@@ -219,9 +228,21 @@ Dictionary control_state(Control *p_control, const String &p_role) {
 		state["tab_count"] = tab_bar->get_tab_count();
 		state["current_tab"] = tab_bar->get_current_tab();
 	}
-	PopupMenu *popup_menu = Object::cast_to<PopupMenu>(p_control);
+	return state;
+}
+
+Dictionary window_state(Window *p_window) {
+	Dictionary state;
+	state["title"] = bounded(p_window->get_title(), EditorSnapshotLimits::MAX_STRING_LENGTH);
+	// PopupMenu and AcceptDialog derive from Window, so their public item and message state is only
+	// reachable on this branch.
+	PopupMenu *popup_menu = Object::cast_to<PopupMenu>(p_window);
 	if (popup_menu != nullptr) {
 		state["item_count"] = popup_menu->get_item_count();
+	}
+	AcceptDialog *dialog = Object::cast_to<AcceptDialog>(p_window);
+	if (dialog != nullptr) {
+		state["message"] = bounded(dialog->get_text(), EditorSnapshotLimits::MAX_STRING_LENGTH);
 	}
 	return state;
 }
@@ -234,6 +255,10 @@ bool control_is_enabled(Control *p_control) {
 	SpinBox *spin_box = Object::cast_to<SpinBox>(p_control);
 	if (spin_box != nullptr) {
 		return spin_box->is_editable();
+	}
+	Slider *slider = Object::cast_to<Slider>(p_control);
+	if (slider != nullptr) {
+		return slider->is_editable();
 	}
 	LineEdit *line_edit = Object::cast_to<LineEdit>(p_control);
 	if (line_edit != nullptr) {
@@ -257,7 +282,7 @@ public:
 	// Collects the emitted descendants of p_parent. Nodes that are neither controls nor windows are
 	// transparent: their children are collected at the same depth so no public control is lost.
 	void collect_children(Node *p_parent, int p_depth, std::vector<EditorElement> &r_children, const String &p_path,
-			bool &r_truncated) {
+			bool p_inherited_internal, bool &r_truncated) {
 		if (p_parent == nullptr) {
 			return;
 		}
@@ -280,8 +305,11 @@ public:
 			if (child == nullptr) {
 				continue;
 			}
-			const bool is_internal = options.include_internal &&
-					public_children.find((uint64_t)child->get_instance_id()) == public_children.end();
+			// Anything reachable only because include_internal was set stays marked internal, including
+			// the public subtree of an internal node and children flattened through non-control nodes.
+			const bool is_internal = p_inherited_internal ||
+					(options.include_internal &&
+							public_children.find((uint64_t)child->get_instance_id()) == public_children.end());
 			add_node(child, p_depth, r_children, p_path, is_internal, r_truncated);
 			if (data.element_limit_reached) {
 				r_truncated = true;
@@ -295,7 +323,7 @@ public:
 		Control *control = Object::cast_to<Control>(p_node);
 		Window *window = Object::cast_to<Window>(p_node);
 		if (control == nullptr && window == nullptr) {
-			collect_children(p_node, p_depth, r_children, p_path, r_truncated);
+			collect_children(p_node, p_depth, r_children, p_path, p_internal, r_truncated);
 			return;
 		}
 		if (control != nullptr && !control->is_visible_in_tree()) {
@@ -351,9 +379,7 @@ public:
 			element.text = bounded(window->get_title(), EditorSnapshotLimits::MAX_STRING_LENGTH);
 			element.visible = true;
 			element.bounds = Rect2(window->get_position(), window->get_size());
-			Dictionary state;
-			state["title"] = element.text;
-			element.state = state;
+			element.state = window_state(window);
 		}
 
 		data.element_count++;
@@ -368,7 +394,7 @@ public:
 			}
 		} else {
 			bool child_truncated = false;
-			collect_children(p_node, p_depth + 1, element.children, element.path, child_truncated);
+			collect_children(p_node, p_depth + 1, element.children, element.path, p_internal, child_truncated);
 			element.truncated = child_truncated;
 		}
 		r_children.push_back(element);

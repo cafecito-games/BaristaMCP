@@ -43,6 +43,19 @@ func _enter_tree() -> void:
 	disabled.disabled = true
 	column.add_child(disabled)
 
+	var recipes := LinkButton.new()
+	recipes.name = "Recipes Link"
+	recipes.text = "Recipes"
+	column.add_child(recipes)
+
+	var grind := HSlider.new()
+	grind.name = "Grind Size"
+	grind.min_value = 1.0
+	grind.max_value = 10.0
+	grind.value = 5.0
+	grind.editable = false
+	column.add_child(grind)
+
 	var order := LineEdit.new()
 	order.name = "Order"
 	order.placeholder_text = "Order"

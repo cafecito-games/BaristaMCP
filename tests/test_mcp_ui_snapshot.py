@@ -91,6 +91,15 @@ class BaristaMCPUISnapshotTests(unittest.TestCase):
         self.assertFalse(disabled["enabled"])
         self.assertEqual(disabled["actions"], [])
 
+        link = find_one([fixture], role="button", name="Recipes")
+        self.assertEqual(link["class"], "LinkButton")
+        self.assertEqual(link["text"], "Recipes")
+
+        grind = find_one([fixture], role="slider", name="Grind Size")
+        self.assertFalse(grind["enabled"])
+        self.assertEqual(grind["actions"], [])
+        self.assertEqual(grind["state"]["value"], 5.0)
+
         order = find_one([fixture], role="text_field", name="Order")
         self.assertEqual(order["class"], "LineEdit")
         self.assertIn("set_text", order["actions"])
@@ -124,7 +133,15 @@ class BaristaMCPUISnapshotTests(unittest.TestCase):
 
     def test_every_element_matches_the_advertised_vocabulary(self) -> None:
         tool = self._tool_schema()
-        element_schema = tool["outputSchema"]["properties"]["tree"]["items"]
+        output_schema = tool["outputSchema"]
+        self.assertEqual(
+            output_schema["properties"]["tree"]["items"], {"$ref": "#/$defs/ui_element"}
+        )
+        element_schema = output_schema["$defs"]["ui_element"]
+        # The recursive contract is one document: children reference the same definition.
+        self.assertEqual(
+            element_schema["properties"]["children"]["items"], {"$ref": "#/$defs/ui_element"}
+        )
         element_properties = set(element_schema["properties"])
         roles = set(element_schema["properties"]["role"]["enum"])
         actions = set(element_schema["properties"]["actions"]["items"]["enum"])
@@ -163,6 +180,16 @@ class BaristaMCPUISnapshotTests(unittest.TestCase):
         self.assertTrue(internal["limits"]["include_internal"])
         self.assertGreater(internal["element_count"], default["element_count"])
         self.assertTrue([element for element in walk(internal["tree"]) if element["internal"]])
+
+        # Internal status is inherited: nothing reachable only through an internal node may claim to
+        # be a public element.
+        def assert_internal_is_inherited(elements: list[dict[str, Any]], parent_internal: bool) -> None:
+            for element in elements:
+                if parent_internal:
+                    self.assertTrue(element["internal"], element)
+                assert_internal_is_inherited(element["children"], element["internal"])
+
+        assert_internal_is_inherited(internal["tree"], False)
 
     def test_limits_are_clamped_and_truncation_is_published(self) -> None:
         shallow = self.client.structured_tool("inspect_editor_ui", {"max_depth": 0})
@@ -235,6 +262,7 @@ class BaristaMCPUISnapshotPortabilityTests(unittest.TestCase):
                 self.assertIn(class_name, classes)
 
         required_classes = (
+            "AcceptDialog",
             "BaseButton",
             "Button",
             "CheckBox",
@@ -242,11 +270,14 @@ class BaristaMCPUISnapshotPortabilityTests(unittest.TestCase):
             "ItemList",
             "Label",
             "LineEdit",
+            "LinkButton",
+            "MenuButton",
             "Node",
             "OptionButton",
             "PopupMenu",
             "Range",
             "RichTextLabel",
+            "Slider",
             "SpinBox",
             "TabBar",
             "TabContainer",
@@ -271,7 +302,12 @@ class BaristaMCPUISnapshotPortabilityTests(unittest.TestCase):
             ),
             "EditorInterface": ("get_base_control",),
             "ItemList": ("get_item_count", "get_selected_items"),
+            "AcceptDialog": ("get_text",),
             "Label": ("get_text",),
+            "LinkButton": ("get_text",),
+            "MenuButton": ("get_item_count",),
+            "Slider": ("is_editable",),
+            "SpinBox": ("is_editable",),
             "LineEdit": ("get_text", "is_editable"),
             "Node": ("get_child_count", "get_children", "get_name"),
             "Object": ("get_class", "get_instance_id", "is_class"),

@@ -42,6 +42,8 @@ Dictionary project_output_schema() {
 	return schema;
 }
 
+constexpr const char *UI_ELEMENT_DEFINITION = "ui_element";
+
 Dictionary ui_element_schema() {
 	Dictionary schema = MCPSchema::object("One semantic editor control or window.");
 	MCPSchema::add_property(schema, "id", MCPSchema::string("Snapshot-scoped element id."), true);
@@ -69,7 +71,7 @@ Dictionary ui_element_schema() {
 			true);
 	MCPSchema::add_property(schema, "state", MCPSchema::open_object("Bounded public state for this role."), true);
 	MCPSchema::add_property(schema, "children",
-			MCPSchema::array(MCPSchema::open_object(), "Child elements, recursively using this element shape."), true);
+			MCPSchema::array(MCPSchema::reference(UI_ELEMENT_DEFINITION), "Child elements, recursively."), true);
 	return schema;
 }
 
@@ -96,8 +98,13 @@ Dictionary ui_snapshot_output_schema() {
 	MCPSchema::add_property(
 			schema, "truncated", MCPSchema::boolean("Whether any limit truncated this snapshot."), true);
 	MCPSchema::add_property(schema, "limits", limits, true);
+	// One recursive definition describes every element at every depth, so the advertised contract and
+	// the contract enforced against the tool's own output stay the same document.
+	MCPSchema::add_definition(schema, UI_ELEMENT_DEFINITION, ui_element_schema());
 	MCPSchema::add_property(schema, "tree",
-			MCPSchema::array(ui_element_schema(), "Snapshot roots, starting at the editor base control."), true);
+			MCPSchema::array(MCPSchema::reference(UI_ELEMENT_DEFINITION),
+					"Snapshot roots, starting at the editor base control."),
+			true);
 	return schema;
 }
 

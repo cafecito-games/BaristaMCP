@@ -1,5 +1,6 @@
 {
   "enabled_classes": [
+    "AcceptDialog",
     "BaseButton",
     "Button",
     "CanvasItem",
@@ -13,7 +14,9 @@
     "JSON",
     "Label",
     "LineEdit",
+    "LinkButton",
     "Marshalls",
+    "MenuButton",
     "Node",
     "OS",
     "OptionButton",
@@ -21,6 +24,7 @@
     "ProjectSettings",
     "Range",
     "RichTextLabel",
+    "Slider",
     "SpinBox",
     "StreamPeerTCP",
     "TCPServer",
