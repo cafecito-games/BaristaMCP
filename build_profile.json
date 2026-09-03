@@ -12,6 +12,12 @@
     "EditorPlugin",
     "EditorSelection",
     "Engine",
+    "InputEvent",
+    "InputEventKey",
+    "InputEventMouse",
+    "InputEventMouseButton",
+    "InputEventMouseMotion",
+    "InputEventWithModifiers",
     "ItemList",
     "JSON",
     "Label",
@@ -29,6 +35,7 @@
     "RichTextLabel",
     "Script",
     "ScriptEditor",
+    "ScrollContainer",
     "Slider",
     "SpinBox",
     "StreamPeerTCP",
@@ -38,6 +45,7 @@
     "TextEdit",
     "Time",
     "Tree",
+    "Viewport",
     "Window"
   ]
 }

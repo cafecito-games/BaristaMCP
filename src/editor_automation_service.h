@@ -9,6 +9,7 @@
 #ifndef BARISTA_MCP_EDITOR_AUTOMATION_SERVICE_H
 #define BARISTA_MCP_EDITOR_AUTOMATION_SERVICE_H
 
+#include "editor_action_driver.h"
 #include "editor_automation_types.h"
 
 #include <godot_cpp/variant/dictionary.hpp>
@@ -36,6 +37,9 @@ class EditorAutomationService {
 	};
 
 	EditorInterface *editor_interface = nullptr;
+	// Frozen at server startup by the plugin and never reconsidered while the server runs, so no
+	// request can widen what this session is allowed to do.
+	bool automation_enabled = false;
 	uint64_t generation = 0;
 	std::map<uint64_t, IssuedHandle> issued_handles;
 	// The capture a cursor can be resumed against. Pagination reuses it instead of recapturing, so a
@@ -57,9 +61,15 @@ class EditorAutomationService {
 	// whose object is no longer of the recorded type.
 	bool _resolve_handle(const String &p_handle, const EditorSnapshotOptions &p_options, EditorSnapshotData &r_data,
 			const EditorElement **r_element, String &r_error, String &r_message);
+	// Resolves the single element a selector names, against entry-time registry state and one fresh
+	// capture. Returns false with the act payload already filled in for every selector failure.
+	bool _resolve_target(const Dictionary &p_arguments, const EditorActionRequest &p_request,
+			EditorSnapshotData &r_data, const EditorElement **r_element, Dictionary &r_failure, String &r_error,
+			String &r_message);
 
 public:
-	void configure(EditorInterface *p_editor_interface);
+	void configure(EditorInterface *p_editor_interface, bool p_automation_enabled);
+	bool is_automation_enabled() const;
 
 	// Returns the structured inspect_editor_ui payload. On failure r_error holds a stable failure
 	// code and the returned dictionary holds a bounded message.
@@ -67,6 +77,9 @@ public:
 	// Returns the structured find_editor_ui payload. Selector, cursor, and handle problems are reported
 	// inside the payload as a selector status; r_error is set only when the editor cannot be inspected.
 	Dictionary find_ui(const Dictionary &p_arguments, String &r_error, String &r_message);
+	// Returns the structured act_on_editor_ui payload. Every client-provokable failure is reported
+	// inside the payload as an action status; r_error is set only when the editor cannot be inspected.
+	Dictionary act_ui(const Dictionary &p_arguments, String &r_error, String &r_message);
 	// Returns one element, with or without its subtree, for the barista://ui/element and
 	// barista://ui/subtree resource templates.
 	Dictionary read_element(const String &p_handle, bool p_include_children, String &r_error, String &r_message);

@@ -36,8 +36,16 @@ public:
 	// response cap enforced by MCPServer.
 	static constexpr int MAX_RESOURCE_PAYLOAD_BYTES = 512 * 1024;
 
-	static Array build_tools_list();
-	static bool find_tool(const String &p_name, Dictionary &r_tool);
+	// Name of the only mutating tool. It is advertised solely when mutation was enabled before startup,
+	// and it is the one tool whose absence must still be answered with a stable status.
+	static constexpr const char *ACT_TOOL_NAME = "act_on_editor_ui";
+
+	// The advertised tool list. The mutating tool is present only when this session enabled mutation
+	// before startup, so a disabled session never advertises what it will refuse to do.
+	static Array build_tools_list(bool p_mutation_enabled);
+	// Looks up one advertised tool. p_mutation_enabled must be true only where the mutating tool's own
+	// schemas are needed, so a disabled session can still publish its refusal in the advertised shape.
+	static bool find_tool(const String &p_name, Dictionary &r_tool, bool p_mutation_enabled);
 
 	static Array build_resources_list();
 	static Array build_resource_templates_list();

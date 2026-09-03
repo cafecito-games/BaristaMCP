@@ -11,6 +11,9 @@ extends EditorPlugin
 ## acceptance tests can assert stable roles, names, state, bounds, and actions.
 
 const FIXTURE_NAME := "Barista Test Fixture"
+## Accessibility name of the label that publishes the action counters. The label's own text changes
+## as actions land, so its stable identity must not come from that text.
+const COUNTERS_NAME := "Action Counters"
 ## Total number of plain nodes in the internal filler subtree. Zero by default so the shared test
 ## project is untouched; an acceptance project raises it to exercise the traversal budget against
 ## many parents that each hold a wide child list.
@@ -18,6 +21,18 @@ const WIDE_INTERNAL_CHILDREN_SETTING := "barista_mcp_test_fixture/wide_internal_
 const WIDE_INTERNAL_GROUP_SIZE := 250
 
 var _panel: PanelContainer = null
+var _counters: Label = null
+## Counts the editor signals the signalling actions are expected to raise, published as label text so
+## an acceptance test observes an action through a fresh snapshot rather than through the tool's own
+## report of itself. Text actions raise no signal that a control method and an input event share, so
+## they are observed through the captured element text instead.
+var _counts := {
+	"clicks": 0,
+	"submits": 0,
+	"toggles": 0,
+	"value_changes": 0,
+	"tab_changes": 0,
+}
 
 
 func _enter_tree() -> void:
@@ -40,6 +55,7 @@ func _enter_tree() -> void:
 	var brew := Button.new()
 	brew.name = "Brew Button"
 	brew.text = "Brew"
+	brew.pressed.connect(_bump.bind("clicks"))
 	column.add_child(brew)
 
 	var disabled := Button.new()
@@ -64,6 +80,7 @@ func _enter_tree() -> void:
 	var order := LineEdit.new()
 	order.name = "Order"
 	order.placeholder_text = "Order"
+	order.text_submitted.connect(func(_text: String) -> void: _bump("submits"))
 	column.add_child(order)
 
 	var passcode := LineEdit.new()
@@ -80,6 +97,7 @@ func _enter_tree() -> void:
 	var decaf := CheckBox.new()
 	decaf.name = "Decaf Check"
 	decaf.text = "Decaf"
+	decaf.toggled.connect(func(_pressed: bool) -> void: _bump("toggles"))
 	column.add_child(decaf)
 
 	var shots := SpinBox.new()
@@ -88,6 +106,7 @@ func _enter_tree() -> void:
 	shots.max_value = 4.0
 	shots.step = 1.0
 	shots.value = 2.0
+	shots.value_changed.connect(func(_value: float) -> void: _bump("value_changes"))
 	column.add_child(shots)
 
 	var beans := ItemList.new()
@@ -115,7 +134,28 @@ func _enter_tree() -> void:
 	var pour_over := Control.new()
 	pour_over.name = "Pour Over"
 	stations.add_child(pour_over)
+	stations.tab_changed.connect(func(_tab: int) -> void: _bump("tab_changes"))
 	column.add_child(stations)
+
+	var menu := ScrollContainer.new()
+	menu.name = "Menu Scroll"
+	menu.set_accessibility_name("Menu Scroll")
+	menu.custom_minimum_size = Vector2(0, 40)
+	var menu_items := VBoxContainer.new()
+	menu_items.name = "Menu Items"
+	for index in 8:
+		var item := Label.new()
+		item.name = "Menu Item %d" % index
+		item.text = "Menu Item %d" % index
+		menu_items.add_child(item)
+	menu.add_child(menu_items)
+	column.add_child(menu)
+
+	_counters = Label.new()
+	_counters.name = "Action Counters"
+	_counters.set_accessibility_name(COUNTERS_NAME)
+	column.add_child(_counters)
+	_publish_counts()
 
 	_add_wide_internal_subtree()
 
@@ -143,9 +183,24 @@ func _add_wide_internal_subtree() -> void:
 	_panel.add_child(filler_root, false, Node.INTERNAL_MODE_BACK)
 
 
+func _bump(counter: String) -> void:
+	_counts[counter] = int(_counts[counter]) + 1
+	_publish_counts()
+
+
+func _publish_counts() -> void:
+	if _counters == null or not is_instance_valid(_counters):
+		return
+	var parts: PackedStringArray = []
+	for counter in _counts:
+		parts.append("%s=%d" % [counter, int(_counts[counter])])
+	_counters.text = " ".join(parts)
+
+
 func _exit_tree() -> void:
 	if _panel == null:
 		return
+	_counters = null
 	if is_instance_valid(_panel):
 		if _panel.get_parent() != null:
 			_panel.get_parent().remove_child(_panel)

@@ -23,6 +23,7 @@
 #include <godot_cpp/classes/popup_menu.hpp>
 #include <godot_cpp/classes/range.hpp>
 #include <godot_cpp/classes/rich_text_label.hpp>
+#include <godot_cpp/classes/scroll_container.hpp>
 #include <godot_cpp/classes/slider.hpp>
 #include <godot_cpp/classes/spin_box.hpp>
 #include <godot_cpp/classes/tab_bar.hpp>
@@ -234,6 +235,13 @@ Dictionary control_state(Control *p_control, const String &p_role) {
 	if (tab_bar != nullptr) {
 		state["tab_count"] = tab_bar->get_tab_count();
 		state["current_tab"] = tab_bar->get_current_tab();
+	}
+	// The scroll offsets are the only public state a scroll action changes, so an element that
+	// advertises "scroll" also publishes what that action moves.
+	ScrollContainer *scroll_container = Object::cast_to<ScrollContainer>(p_control);
+	if (scroll_container != nullptr) {
+		state["scroll_horizontal"] = scroll_container->get_h_scroll();
+		state["scroll_vertical"] = scroll_container->get_v_scroll();
 	}
 	return state;
 }

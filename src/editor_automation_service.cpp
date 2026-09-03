@@ -8,11 +8,14 @@
 
 #include "editor_automation_service.h"
 
+#include "editor_action_driver.h"
 #include "editor_selector.h"
 #include "editor_snapshot.h"
 
+#include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/variant/array.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/variant.hpp>
 
 namespace godot {
@@ -35,8 +38,13 @@ int64_t serialized_size(const Dictionary &p_payload) {
 
 } // namespace
 
-void EditorAutomationService::configure(EditorInterface *p_editor_interface) {
+void EditorAutomationService::configure(EditorInterface *p_editor_interface, bool p_automation_enabled) {
 	editor_interface = p_editor_interface;
+	automation_enabled = p_automation_enabled;
+}
+
+bool EditorAutomationService::is_automation_enabled() const {
+	return automation_enabled;
 }
 
 EditorSnapshotOptions EditorAutomationService::parse_options(const Dictionary &p_arguments) {
@@ -469,6 +477,182 @@ Dictionary EditorAutomationService::find_ui(const Dictionary &p_arguments, Strin
 			cached_snapshot.element_limit_reached || cached_snapshot.traversal_limit_reached;
 	return find_payload(true, EditorSelector::status_name(EditorSelector::Status::OK), String(),
 			cached_snapshot.generation, total, offset, limit, truncated, next_cursor, matches);
+}
+
+bool EditorAutomationService::_resolve_target(const Dictionary &p_arguments, const EditorActionRequest &p_request,
+		EditorSnapshotData &r_data, const EditorElement **r_element, Dictionary &r_failure, String &r_error,
+		String &r_message) {
+	*r_element = nullptr;
+	r_failure = Dictionary();
+
+	if (!p_arguments.has("selector")) {
+		r_failure = EditorActionDriver::failure(EditorActionDriver::Status::INVALID_SELECTOR,
+				"act_on_editor_ui requires a selector; an absent selector never names an element.", p_request.action);
+		return false;
+	}
+	EditorSelectorQuery query;
+	String selector_message;
+	if (!EditorSelector::parse(p_arguments.get("selector", Variant()), query, selector_message)) {
+		r_failure = EditorActionDriver::failure(
+				EditorActionDriver::Status::INVALID_SELECTOR, selector_message, p_request.action);
+		return false;
+	}
+
+	// The registry is consulted before this request captures anything. Capturing first would register
+	// every live handle, so a handle Barista had never issued would be admitted by the very request
+	// that supplied it, and the class recorded for a reused instance id would be overwritten before it
+	// could be compared.
+	const PackedStringArray query_handles = EditorSelector::handles(query);
+	std::vector<String> previous_classes;
+	for (int i = 0; i < query_handles.size(); i++) {
+		uint64_t instance_id = 0;
+		if (!parse_handle(query_handles[i], instance_id)) {
+			r_failure = EditorActionDriver::failure(EditorActionDriver::Status::STALE_HANDLE,
+					"Handle '" + query_handles[i] + "' was not issued by Barista.", p_request.action);
+			return false;
+		}
+		const auto issued = issued_handles.find(instance_id);
+		if (issued == issued_handles.end()) {
+			r_failure = EditorActionDriver::failure(EditorActionDriver::Status::STALE_HANDLE,
+					"Handle '" + query_handles[i] + "' was not issued by Barista.", p_request.action);
+			return false;
+		}
+		previous_classes.push_back(issued->second.class_name);
+	}
+
+	Dictionary payload;
+	if (!_capture(parse_options(p_arguments), r_data, payload, r_error, r_message)) {
+		return false;
+	}
+
+	for (int i = 0; i < query_handles.size(); i++) {
+		const EditorElement *resolved = find_by_handle(r_data.roots, query_handles[i]);
+		if (resolved != nullptr && resolved->class_name != previous_classes[(size_t)i]) {
+			r_failure = EditorActionDriver::failure(EditorActionDriver::Status::STALE_HANDLE,
+					"Handle '" + query_handles[i] + "' now refers to a different object type.", p_request.action);
+			return false;
+		}
+	}
+
+	std::vector<const EditorElement *> page;
+	int total = 0;
+	bool visit_limit_reached = false;
+	// Two matches are enough to prove ambiguity, so the match walk is never asked for a whole page.
+	const EditorSelector::Status status = EditorSelector::match(r_data, query, 0, 2, page, total, visit_limit_reached);
+	if (status == EditorSelector::Status::NO_MATCH) {
+		for (int i = 0; i < query_handles.size(); i++) {
+			if (find_by_handle(r_data.roots, query_handles[i]) == nullptr) {
+				r_failure = EditorActionDriver::failure(EditorActionDriver::Status::STALE_HANDLE,
+						"Handle '" + query_handles[i] + "' no longer resolves to a captured element.",
+						p_request.action);
+				return false;
+			}
+		}
+		r_failure = EditorActionDriver::failure(
+				EditorActionDriver::Status::NO_MATCH, "No element matched the selector.", p_request.action);
+		return false;
+	}
+	// A truncated walk, or a capture that omitted elements before matching began, only ever counts a
+	// lower bound, so a single match cannot be shown to be the only one.
+	const bool snapshot_truncated =
+			r_data.depth_truncated || r_data.element_limit_reached || r_data.traversal_limit_reached;
+	if (total > 1 || visit_limit_reached || snapshot_truncated) {
+		const String reason = total > 1
+				? "The selector matched " + String::num_int64(total) +
+						" elements where exactly one is required; an action never picks the first."
+				: "The capture was truncated, so the selector cannot be shown to name exactly one element.";
+		r_failure =
+				EditorActionDriver::failure(EditorActionDriver::Status::AMBIGUOUS_SELECTOR, reason, p_request.action);
+		return false;
+	}
+	if (page.empty()) {
+		r_failure = EditorActionDriver::failure(
+				EditorActionDriver::Status::NO_MATCH, "No element matched the selector.", p_request.action);
+		return false;
+	}
+	*r_element = page[0];
+	return true;
+}
+
+Dictionary EditorAutomationService::act_ui(const Dictionary &p_arguments, String &r_error, String &r_message) {
+	r_error = String();
+	r_message = String();
+
+	// The gate is entry-time state frozen at startup, so it is read before anything else can capture
+	// or mutate.
+	if (!automation_enabled) {
+		return EditorActionDriver::failure(EditorActionDriver::Status::AUTOMATION_DISABLED,
+				"Editor automation is disabled in this session; no action was performed.");
+	}
+
+	EditorActionRequest request;
+	String parse_message;
+	if (!EditorActionDriver::parse(p_arguments, request, parse_message)) {
+		return EditorActionDriver::failure(EditorActionDriver::Status::INVALID_ARGUMENTS, parse_message);
+	}
+
+	EditorSnapshotData before;
+	const EditorElement *element = nullptr;
+	Dictionary failure;
+	if (!_resolve_target(p_arguments, request, before, &element, failure, r_error, r_message)) {
+		return r_error.is_empty() ? failure : Dictionary();
+	}
+
+	// The element proves a live node with this instance id is in the editor tree, so the lookup below
+	// can only return that node; the recorded class is re-checked all the same.
+	uint64_t instance_id = 0;
+	Object *object =
+			parse_handle(element->handle, instance_id) ? UtilityFunctions::instance_from_id(instance_id) : nullptr;
+	Control *control = Object::cast_to<Control>(object);
+	if (object == nullptr || object->get_class() != element->class_name || control == nullptr) {
+		Dictionary payload = EditorActionDriver::failure(EditorActionDriver::Status::ELEMENT_NOT_INTERACTABLE,
+				"The element is no longer an interactable control.", request.action);
+		payload["handle"] = element->handle;
+		payload["generation"] = (int64_t)before.generation;
+		return payload;
+	}
+
+	const String handle = element->handle;
+	const String before_element = JSON::stringify(EditorSnapshot::serialize_element(*element, false), "", false);
+
+	EditorActionDriver::Route route = EditorActionDriver::Route::NONE;
+	EditorActionDriver::Status status = EditorActionDriver::Status::OK;
+	String action_message;
+	if (!EditorActionDriver::perform(control, *element, request, route, status, action_message)) {
+		Dictionary payload = EditorActionDriver::failure(status, action_message, request.action);
+		payload["handle"] = handle;
+		payload["generation"] = (int64_t)before.generation;
+		return payload;
+	}
+
+	// The result names the snapshot taken after the action, never the one the action was decided on.
+	EditorSnapshotData after;
+	Dictionary after_payload;
+	if (!_capture(parse_options(p_arguments), after, after_payload, r_error, r_message)) {
+		return Dictionary();
+	}
+	const EditorElement *after_element = find_by_handle(after.roots, handle);
+
+	Dictionary payload;
+	payload["ok"] = true;
+	payload["status"] = EditorActionDriver::status_name(EditorActionDriver::Status::OK);
+	payload["message"] = String();
+	payload["action"] = request.action;
+	payload["route"] = EditorActionDriver::route_name(route);
+	// "changed" is only ever what Barista can verify: whether the acted element's own published fields
+	// differ between the capture the action was decided on and the capture taken after it. An action
+	// whose effect lands elsewhere in the editor reports false rather than claiming a change.
+	Dictionary after_serialized;
+	if (after_element != nullptr) {
+		after_serialized = EditorSnapshot::serialize_element(*after_element, false);
+		payload["changed"] = JSON::stringify(after_serialized, "", false) != before_element;
+		payload["element"] = after_serialized;
+	} else {
+		payload["changed"] = true;
+	}
+	payload["generation"] = (int64_t)after.generation;
+	payload["handle"] = handle;
+	return payload;
 }
 
 void EditorAutomationService::process(double p_delta) {

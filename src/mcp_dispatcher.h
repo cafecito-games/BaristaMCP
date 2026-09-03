@@ -28,6 +28,11 @@ class MCPDispatcher {
 
 	LifecycleState lifecycle_state = UNINITIALIZED;
 	EditorToolProvider tool_provider;
+	// Frozen at server startup: whether this session advertises the mutating tool at all.
+	bool mutation_enabled = false;
+	// Spent by the first mutating call inside one accepted HTTP request. A batch that repeats a
+	// mutating call is refused rather than performed twice.
+	bool mutation_handled = false;
 
 	static Dictionary _make_error(
 			const Variant &p_id, int p_code, const String &p_message, const Dictionary &p_data = Dictionary());
@@ -45,8 +50,11 @@ public:
 	};
 
 	Dictionary handle_message(const Dictionary &p_message, bool &r_has_response);
+	// Restores the one mutation an accepted HTTP request may perform. The transport calls it once per
+	// request body, before any message in that body is handled.
+	void begin_http_request();
 	void configure_tools(EditorInterface *p_editor_interface, EditorAutomationService *p_automation_service,
-			const String &p_endpoint, int p_port);
+			const String &p_endpoint, int p_port, bool p_mutation_enabled);
 	bool is_initialized() const;
 	void reset();
 };

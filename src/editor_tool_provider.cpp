@@ -8,6 +8,7 @@
 
 #include "editor_tool_provider.h"
 
+#include "editor_action_driver.h"
 #include "editor_automation_service.h"
 #include "editor_state_reader.h"
 #include "mcp_contracts.h"
@@ -23,12 +24,17 @@
 
 namespace godot {
 
+bool EditorToolProvider::is_mutating_tool(const String &p_name) {
+	return p_name == MCPContracts::ACT_TOOL_NAME;
+}
+
 void EditorToolProvider::configure(EditorInterface *p_editor_interface, EditorAutomationService *p_automation_service,
-		const String &p_endpoint, int p_port) {
+		const String &p_endpoint, int p_port, bool p_mutation_enabled) {
 	editor_interface = p_editor_interface;
 	automation_service = p_automation_service;
 	endpoint = p_endpoint;
 	port = p_port;
+	mutation_enabled = p_mutation_enabled;
 }
 
 Dictionary EditorToolProvider::_tool_result(const Dictionary &p_structured, bool p_is_error) {
@@ -54,6 +60,7 @@ Dictionary EditorToolProvider::status(bool p_initialized) const {
 	status["local_only"] = true;
 	status["endpoint"] = endpoint;
 	status["port"] = port;
+	status["automation_enabled"] = mutation_enabled;
 	return status;
 }
 
@@ -63,6 +70,20 @@ Dictionary EditorToolProvider::project_info() const {
 
 Dictionary EditorToolProvider::editor_state() const {
 	return EditorStateReader::editor_state(editor_interface);
+}
+
+Dictionary EditorToolProvider::_act_result(const Dictionary &p_payload) {
+	Dictionary tool;
+	String schema_error;
+	// Even a refusal is validated against the mutating tool's advertised output schema, so a session
+	// that never advertises the tool still cannot answer outside its published shape.
+	if (MCPContracts::find_tool(MCPContracts::ACT_TOOL_NAME, tool, true) &&
+			!MCPSchema::validate(tool.get("outputSchema", Dictionary()), p_payload, schema_error)) {
+		return _tool_error("output_contract_violation",
+				"Tool '" + String(MCPContracts::ACT_TOOL_NAME) +
+						"' produced output outside its advertised schema: " + schema_error);
+	}
+	return _tool_result(p_payload, true);
 }
 
 Dictionary EditorToolProvider::_tool_error(const String &p_error, const String &p_message) {
@@ -112,14 +133,32 @@ bool EditorToolProvider::read_resource(
 	return r_error.is_empty();
 }
 
-Dictionary EditorToolProvider::call(const String &p_name, const Dictionary &p_arguments, bool p_initialized) const {
+Dictionary EditorToolProvider::call(
+		const String &p_name, const Dictionary &p_arguments, bool p_initialized, bool p_mutation_allowed) const {
+	// The mutating tool answers in its own advertised shape even where it is not advertised, so a
+	// disabled session reports a stable status instead of looking like an unknown tool.
+	if (is_mutating_tool(p_name)) {
+		if (!mutation_enabled) {
+			return _act_result(EditorActionDriver::failure(EditorActionDriver::Status::AUTOMATION_DISABLED,
+					"Editor automation is disabled in this session; no action was performed."));
+		}
+		if (!p_mutation_allowed) {
+			return _act_result(EditorActionDriver::failure(EditorActionDriver::Status::MUTATION_ALREADY_HANDLED,
+					"This request already handled a mutating call; no second action was performed."));
+		}
+	}
+
 	Dictionary tool;
-	if (!MCPContracts::find_tool(p_name, tool)) {
+	if (!MCPContracts::find_tool(p_name, tool, mutation_enabled)) {
 		return _tool_error("unknown_tool", "Unknown tool '" + p_name + "'.");
 	}
 
 	String schema_error;
 	if (!MCPSchema::validate(tool.get("inputSchema", Dictionary()), p_arguments, schema_error)) {
+		if (is_mutating_tool(p_name)) {
+			return _act_result(EditorActionDriver::failure(EditorActionDriver::Status::INVALID_ARGUMENTS,
+					"act_on_editor_ui rejected its arguments: " + schema_error));
+		}
 		return _tool_error("invalid_arguments", "Tool '" + p_name + "' rejected its arguments: " + schema_error);
 	}
 
@@ -137,6 +176,17 @@ Dictionary EditorToolProvider::call(const String &p_name, const Dictionary &p_ar
 		String automation_error;
 		String automation_message;
 		structured = automation_service->find_ui(p_arguments, automation_error, automation_message);
+		if (!automation_error.is_empty()) {
+			return _tool_error(automation_error, automation_message);
+		}
+	} else if (is_mutating_tool(p_name)) {
+		if (automation_service == nullptr) {
+			return _act_result(EditorActionDriver::failure(EditorActionDriver::Status::UNSUPPORTED_CAPABILITY,
+					"Editor automation is unavailable in this session."));
+		}
+		String automation_error;
+		String automation_message;
+		structured = automation_service->act_ui(p_arguments, automation_error, automation_message);
 		if (!automation_error.is_empty()) {
 			return _tool_error(automation_error, automation_message);
 		}
@@ -160,6 +210,9 @@ Dictionary EditorToolProvider::call(const String &p_name, const Dictionary &p_ar
 	if (!MCPSchema::validate(tool.get("outputSchema", Dictionary()), structured, schema_error)) {
 		return _tool_error("output_contract_violation",
 				"Tool '" + p_name + "' produced output outside its advertised schema: " + schema_error);
+	}
+	if (is_mutating_tool(p_name)) {
+		return _tool_result(structured, !(bool)structured.get("ok", false));
 	}
 	return _tool_result(structured, false);
 }

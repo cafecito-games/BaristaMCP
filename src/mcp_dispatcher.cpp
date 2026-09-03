@@ -142,9 +142,12 @@ Dictionary MCPDispatcher::handle_message(const Dictionary &p_message, bool &r_ha
 		result["protocolVersion"] = MCPContracts::PROTOCOL_VERSION;
 		result["capabilities"] = capabilities;
 		result["serverInfo"] = server_info;
-		result["instructions"] =
-				"Local, read-only Godot editor integration. Use tools/list to inspect available tools and "
-				"resources/list to inspect available resources.";
+		result["instructions"] = mutation_enabled
+				? String("Local Godot editor integration with editor automation enabled for this session. Use "
+						 "tools/list to inspect available tools and resources/list to inspect available "
+						 "resources.")
+				: String("Local, read-only Godot editor integration. Use tools/list to inspect available tools "
+						 "and resources/list to inspect available resources.");
 		lifecycle_state = INITIALIZE_RESPONDED;
 		return _make_result(id, result);
 	}
@@ -163,7 +166,7 @@ Dictionary MCPDispatcher::handle_message(const Dictionary &p_message, bool &r_ha
 			return _make_error(id, INVALID_PARAMS, "tools/list " + params_error);
 		}
 		Dictionary result;
-		result["tools"] = MCPContracts::build_tools_list();
+		result["tools"] = MCPContracts::build_tools_list(mutation_enabled);
 		return _make_result(id, result);
 	}
 	if (method == "resources/list" || method == "resources/templates/list") {
@@ -241,16 +244,28 @@ Dictionary MCPDispatcher::handle_message(const Dictionary &p_message, bool &r_ha
 			}
 			arguments = params.get("arguments", Variant());
 		}
+		const String tool_name = params.get("name", Variant());
+		// The budget is spent on the attempt, not on its outcome: a mutating call that was handled once
+		// is never handled again inside the same accepted request.
+		const bool mutation_allowed = !mutation_handled;
+		if (EditorToolProvider::is_mutating_tool(tool_name)) {
+			mutation_handled = true;
+		}
 		return _make_result(
-				id, tool_provider.call(params.get("name", Variant()), arguments, lifecycle_state == INITIALIZED));
+				id, tool_provider.call(tool_name, arguments, lifecycle_state == INITIALIZED, mutation_allowed));
 	}
 
 	return _make_error(id, METHOD_NOT_FOUND, "Unknown method '" + method + "'.");
 }
 
+void MCPDispatcher::begin_http_request() {
+	mutation_handled = false;
+}
+
 void MCPDispatcher::configure_tools(EditorInterface *p_editor_interface, EditorAutomationService *p_automation_service,
-		const String &p_endpoint, int p_port) {
-	tool_provider.configure(p_editor_interface, p_automation_service, p_endpoint, p_port);
+		const String &p_endpoint, int p_port, bool p_mutation_enabled) {
+	mutation_enabled = p_mutation_enabled;
+	tool_provider.configure(p_editor_interface, p_automation_service, p_endpoint, p_port, p_mutation_enabled);
 }
 
 bool MCPDispatcher::is_initialized() const {
