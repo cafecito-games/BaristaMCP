@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import http.client
 import os
 import queue
 import re
@@ -9,6 +10,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +87,48 @@ class EditorProcess:
             self.process.stdout.close()
 
 
+class MCPClient:
+    def __init__(self, discovery: dict[str, object]) -> None:
+        endpoint = urlsplit(str(discovery["endpoint"]))
+        self.host = endpoint.hostname or "127.0.0.1"
+        self.port = endpoint.port or 80
+        self.path = endpoint.path
+        self.token = str(discovery["token"])
+        self.next_id = 1
+
+    def request(self, payload: object) -> tuple[int, str]:
+        body = json.dumps(payload, separators=(",", ":"))
+        connection = http.client.HTTPConnection(self.host, self.port, timeout=3)
+        try:
+            connection.request(
+                "POST",
+                self.path,
+                body=body,
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            )
+            response = connection.getresponse()
+            return response.status, response.read().decode("utf-8")
+        finally:
+            connection.close()
+
+    def rpc(self, method: str, params: dict[str, object]) -> dict[str, object]:
+        request_id = self.next_id
+        self.next_id += 1
+        status, body = self.request(
+            {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+        )
+        if status != 200:
+            raise AssertionError(f"Expected HTTP 200, received {status}: {body}")
+        response = json.loads(body)
+        if response.get("id") != request_id:
+            raise AssertionError(f"Mismatched JSON-RPC id: {response!r}")
+        return response
+
+
 class BaristaMCPAcceptanceTests(unittest.TestCase):
     def test_discovery(self) -> None:
         editor = EditorProcess()
@@ -98,6 +142,45 @@ class BaristaMCPAcceptanceTests(unittest.TestCase):
         self.assertIs(discovery["local_only"], True)
         self.assertRegex(str(discovery["endpoint"]), r"^http://127\.0\.0\.1:\d+/mcp$")
         self.assertGreater(len(str(discovery["token"])), 20)
+
+    def test_initialize_and_ping(self) -> None:
+        editor = EditorProcess()
+        try:
+            editor.start()
+            client = MCPClient(editor.wait_for_discovery())
+            try:
+                initialize = client.rpc(
+                    "initialize",
+                    {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "clientInfo": {"name": "barista-test", "version": "0.1"},
+                    },
+                )
+                self.assertEqual(initialize["result"]["protocolVersion"], "2025-11-25")
+                self.assertEqual(
+                    initialize["result"]["serverInfo"],
+                    {"name": "BaristaMCP", "version": "0.1.0"},
+                )
+                self.assertEqual(
+                    initialize["result"]["capabilities"]["tools"]["listChanged"],
+                    False,
+                )
+
+                status, body = client.request(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/initialized",
+                        "params": {},
+                    }
+                )
+                self.assertEqual(status, 202)
+                self.assertEqual(body, "")
+                self.assertEqual(client.rpc("ping", {})["result"], {})
+            except (OSError, TimeoutError, json.JSONDecodeError) as error:
+                self.fail(f"MCP initialize request failed: {error}")
+        finally:
+            editor.stop()
 
 
 if __name__ == "__main__":
