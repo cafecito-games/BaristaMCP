@@ -108,6 +108,16 @@ Dictionary EditorToolProvider::call(const String &p_name, const Dictionary &p_ar
 		structured = status(p_initialized);
 	} else if (p_name == "get_project_info") {
 		structured = project_info();
+	} else if (p_name == "find_editor_ui") {
+		if (automation_service == nullptr) {
+			return _tool_error("unsupported_capability", "Editor automation is unavailable in this session.");
+		}
+		String automation_error;
+		String automation_message;
+		structured = automation_service->find_ui(p_arguments, automation_error, automation_message);
+		if (!automation_error.is_empty()) {
+			return _tool_error(automation_error, automation_message);
+		}
 	} else if (p_name == "inspect_editor_ui") {
 		if (automation_service == nullptr) {
 			return _tool_error("unsupported_capability", "Editor automation is unavailable in this session.");

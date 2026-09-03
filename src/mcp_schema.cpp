@@ -236,6 +236,13 @@ Dictionary MCPSchema::integer(const String &p_description) {
 	return schema;
 }
 
+Dictionary MCPSchema::ranged_integer(int64_t p_minimum, int64_t p_maximum, const String &p_description) {
+	Dictionary schema = make_schema("integer", p_description);
+	schema["minimum"] = p_minimum < INTEGER_MINIMUM ? INTEGER_MINIMUM : p_minimum;
+	schema["maximum"] = p_maximum > INTEGER_MAXIMUM ? INTEGER_MAXIMUM : p_maximum;
+	return schema;
+}
+
 Dictionary MCPSchema::number(const String &p_description) {
 	return make_schema("number", p_description);
 }

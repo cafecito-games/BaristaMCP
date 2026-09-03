@@ -138,7 +138,7 @@ class BaristaMCPResourceTests(unittest.TestCase):
             tools = client.rpc("tools/list", {})["result"]["tools"]
             self.assertEqual(
                 [tool["name"] for tool in tools],
-                ["barista_status", "get_project_info", "inspect_editor_ui"],
+                ["barista_status", "get_project_info", "find_editor_ui", "inspect_editor_ui"],
             )
             for tool in tools:
                 with self.subTest(tool=tool["name"]):

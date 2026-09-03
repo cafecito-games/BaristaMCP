@@ -9,6 +9,7 @@
 #include "mcp_contracts.h"
 
 #include "editor_automation_types.h"
+#include "editor_selector.h"
 #include "editor_snapshot.h"
 #include "mcp_schema.h"
 
@@ -43,8 +44,11 @@ Dictionary project_output_schema() {
 }
 
 constexpr const char *UI_ELEMENT_DEFINITION = "ui_element";
+constexpr const char *UI_MATCH_DEFINITION = "ui_match";
 
-Dictionary ui_element_schema() {
+// One field set describes an element everywhere it is published. A match list carries the same fields
+// with an always-empty "children" array, so a single page can never carry a whole subtree.
+Dictionary ui_element_schema(bool p_recursive = true) {
 	Dictionary schema = MCPSchema::object("One semantic editor control or window.");
 	MCPSchema::add_property(schema, "id", MCPSchema::string("Snapshot-scoped element id."), true);
 	MCPSchema::add_property(
@@ -71,7 +75,63 @@ Dictionary ui_element_schema() {
 			true);
 	MCPSchema::add_property(schema, "state", MCPSchema::open_object("Bounded public state for this role."), true);
 	MCPSchema::add_property(schema, "children",
-			MCPSchema::array(MCPSchema::reference(UI_ELEMENT_DEFINITION), "Child elements, recursively."), true);
+			p_recursive ? MCPSchema::array(MCPSchema::reference(UI_ELEMENT_DEFINITION), "Child elements, recursively.")
+						: MCPSchema::array(MCPSchema::object(), "Always empty; read a subtree resource for children."),
+			true);
+	return schema;
+}
+
+Dictionary selector_input_schema() {
+	String description = "Semantic selector. Every constraint must hold; an absent constraint never "
+						 "broadens the match. Fields: ";
+	const PackedStringArray fields = EditorSelector::field_vocabulary();
+	for (int i = 0; i < fields.size(); i++) {
+		description += (i == 0 ? String() : String(", ")) + fields[i];
+	}
+	description += ". EditorSelector owns this vocabulary and rejects an unknown field, a field of the "
+				   "wrong type, and an empty selector with the invalid_selector status.";
+	return MCPSchema::open_object(description);
+}
+
+Dictionary find_input_schema() {
+	Dictionary schema = MCPSchema::object("One bounded semantic selector query over a UI capture.");
+	MCPSchema::add_property(schema, "selector", selector_input_schema(), false);
+	MCPSchema::add_property(schema, "limit",
+			MCPSchema::ranged_integer(EditorSelectorLimits::MIN_LIMIT, EditorSelectorLimits::MAX_LIMIT,
+					"Maximum matches returned in one page."),
+			false);
+	MCPSchema::add_property(schema, "cursor", MCPSchema::string("Opaque cursor returned by a previous page."), false);
+	MCPSchema::add_property(schema, "require_unique",
+			MCPSchema::boolean("Fail with ambiguous_selector when more than one element matches."), false);
+	MCPSchema::add_property(schema, "max_depth",
+			MCPSchema::integer("Maximum traversal depth; clamped to the documented range."), false);
+	MCPSchema::add_property(schema, "max_elements",
+			MCPSchema::integer("Maximum captured elements; clamped to the documented range."), false);
+	MCPSchema::add_property(schema, "include_internal",
+			MCPSchema::boolean("Include internal children, which are hidden by default."), false);
+	return schema;
+}
+
+Dictionary find_output_schema() {
+	Dictionary schema = MCPSchema::object("Result of one bounded selector query.");
+	MCPSchema::add_property(schema, "ok", MCPSchema::boolean("True only when the status is 'ok'."), true);
+	MCPSchema::add_property(schema, "status",
+			MCPSchema::enum_string(EditorSelector::status_vocabulary(), "Selector status for this query."), true);
+	MCPSchema::add_property(
+			schema, "message", MCPSchema::string("Bounded diagnostic, empty when the query succeeded."), true);
+	MCPSchema::add_property(schema, "generation",
+			MCPSchema::integer("Capture this result was matched against, or 0 when nothing was captured."), true);
+	MCPSchema::add_property(schema, "match_count", MCPSchema::integer("Total matches in the capture."), true);
+	MCPSchema::add_property(schema, "returned_count", MCPSchema::integer("Matches carried by this page."), true);
+	MCPSchema::add_property(schema, "offset", MCPSchema::integer("Offset of this page within the matches."), true);
+	MCPSchema::add_property(schema, "limit", MCPSchema::integer("Page size applied to this query."), true);
+	MCPSchema::add_property(schema, "truncated",
+			MCPSchema::boolean("Whether matches or the underlying capture were cut by a published limit."), true);
+	MCPSchema::add_property(schema, "next_cursor",
+			MCPSchema::string("Cursor for the next page, or an empty string when this page is the last."), true);
+	MCPSchema::add_definition(schema, UI_MATCH_DEFINITION, ui_element_schema(false));
+	MCPSchema::add_property(schema, "matches",
+			MCPSchema::array(MCPSchema::reference(UI_MATCH_DEFINITION), "Matched elements in document order."), true);
 	return schema;
 }
 
@@ -151,6 +211,9 @@ Array MCPContracts::build_tools_list() {
 			status_output_schema()));
 	tools.push_back(make_tool("get_project_info",
 			"Read stock Godot version, project, edited scene, and play-state information.", project_output_schema()));
+	tools.push_back(make_tool("find_editor_ui",
+			"Find editor UI elements by semantic selector, with bounded pages and durable handles.",
+			find_output_schema(), find_input_schema()));
 	tools.push_back(make_tool("inspect_editor_ui",
 			"Capture a bounded semantic snapshot of the stock Godot editor UI through public APIs.",
 			ui_snapshot_output_schema(), ui_snapshot_input_schema()));
