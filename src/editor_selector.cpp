@@ -32,6 +32,16 @@ constexpr const char *FIELD_WITHIN = "within";
 const char *const SELECTOR_FIELDS[] = {FIELD_HANDLE, FIELD_ROLE, FIELD_NAME, FIELD_TEXT, FIELD_TEXT_CONTAINS,
 		FIELD_CLASS, FIELD_VISIBLE, FIELD_ENABLED, FIELD_FOCUSED, FIELD_PRESSED, FIELD_SELECTED, FIELD_WITHIN};
 
+// A diagnostic quotes only as much of a client-supplied name as identifies it. Echoing an arbitrary
+// one verbatim would let an accepted request turn its own refusal into a response too large for the
+// transport to send, which would answer with a transport error instead of the selector status.
+String bounded_name(const String &p_name) {
+	if (p_name.length() <= EditorSelectorLimits::MAX_VALUE_LENGTH) {
+		return p_name;
+	}
+	return p_name.substr(0, EditorSelectorLimits::MAX_VALUE_LENGTH) + "...";
+}
+
 constexpr const char *CURSOR_MAGIC = "bcur1";
 constexpr const char *CURSOR_SEPARATOR = "|";
 constexpr int CURSOR_FIELD_COUNT = 8;
@@ -101,7 +111,7 @@ bool parse_query(const Variant &p_selector, EditorSelectorQuery &r_query, int p_
 			}
 		}
 		if (!known) {
-			r_message = "Unknown selector field '" + name + "'.";
+			r_message = "Unknown selector field '" + bounded_name(name) + "'.";
 			return false;
 		}
 	}

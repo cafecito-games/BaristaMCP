@@ -26,6 +26,18 @@ Dictionary make_schema(const String &p_type, const String &p_description) {
 	return schema;
 }
 
+// Longest client-supplied property name a validation error will quote. A diagnostic that echoed an
+// arbitrary name verbatim would let an accepted request turn its own refusal into a response too
+// large for the transport to send, which would answer with a transport error instead of the refusal.
+constexpr int MAX_QUOTED_NAME_LENGTH = 64;
+
+String bounded_name(const String &p_name) {
+	if (p_name.length() <= MAX_QUOTED_NAME_LENGTH) {
+		return p_name;
+	}
+	return p_name.substr(0, MAX_QUOTED_NAME_LENGTH) + "...";
+}
+
 // The range an "integer" schema promises. JSON carries every number as a double, so a well-formed
 // integral number can still sit outside int64_t; converting such a value is undefined and diverges
 // between architectures (arm64 saturates, x86-64 yields INT64_MIN). The boundary rejects it instead.
@@ -143,7 +155,7 @@ bool validate_against(const Dictionary &p_root, const Dictionary &p_schema, cons
 		for (int i = 0; i < required.size(); i++) {
 			const String name = required[i];
 			if (!value.has(name)) {
-				r_error = p_path + String(" is missing required property '") + name + "'.";
+				r_error = p_path + String(" is missing required property '") + bounded_name(name) + "'.";
 				return false;
 			}
 		}
@@ -158,7 +170,7 @@ bool validate_against(const Dictionary &p_root, const Dictionary &p_schema, cons
 			const String name = key;
 			if (!properties.has(name)) {
 				if (!allows_additional) {
-					r_error = p_path + String(" has unknown property '") + name + "'.";
+					r_error = p_path + String(" has unknown property '") + bounded_name(name) + "'.";
 					return false;
 				}
 				continue;

@@ -400,6 +400,26 @@ class BaristaMCPWaitContractTests(WaitClientMixin, unittest.TestCase):
         self.assertEqual(refused["status"], "wait_not_found", refused["status"])
         self.assertLess(len(refused["message"]), 400)
 
+    def test_an_oversized_field_name_is_still_refused_in_its_own_contract(self) -> None:
+        """Same class as the oversized id: no diagnostic may echo client input unbounded."""
+        oversized = "x" * 700_000
+        refused = self.wait(condition={"type": "selector_appears", "selector": {oversized: "value"}})
+        self.assertEqual(refused["status"], "invalid_arguments", refused["status"])
+        self.assertLess(len(refused["message"]), 1000)
+
+        # The same input reaches the shared selector parser through find_editor_ui.
+        found = self.client.structured_tool("find_editor_ui", {"selector": {oversized: "value"}})
+        self.assertEqual(found["status"], "invalid_selector", found["status"])
+        self.assertLess(len(found["message"]), 1000)
+
+        # And the schema validator itself quotes an unknown property no less carefully.
+        result = self.client.rpc(
+            "tools/call", {"name": WAIT_TOOL, "arguments": {oversized: 1}}
+        )["result"]
+        self.assertIs(result["isError"], True)
+        self.assertEqual(result["structuredContent"]["error"], "invalid_arguments")
+        self.assertLess(len(result["structuredContent"]["message"]), 1000)
+
     def test_wait_ids_are_opaque_and_unique(self) -> None:
         issued = []
         for _ in range(4):
