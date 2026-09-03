@@ -66,6 +66,26 @@ ADVERTISED_ACTIONS = (
     "select_tab",
     "scroll",
 )
+# The whole claim vocabulary, mirrored from MCPContracts::claim_vocabulary in src/mcp_contracts.cpp.
+ACTION_CLAIMS = ("delivery", "effect")
+# What "ok" asserts for each advertised route, mirrored from ACTION_CLAIM_RULES in
+# src/mcp_contracts.cpp:31. A delivery route asserts only that the input reached the exact requested
+# target; an effect route asserts the requested state holds and verifies it.
+EXPECTED_ACTION_CLAIMS = {
+    "click": "delivery",
+    "submit": "delivery",
+    "type_text": "delivery",
+    "focus": "effect",
+    "set_text": "effect",
+    "set_checked": "effect",
+    "set_value": "effect",
+    "select_item": "effect",
+    "select_tab": "effect",
+    "scroll": "effect",
+}
+# The field cap the fixture publishes on its "Ticket" field
+# (project/addons/barista_mcp_test_fixture/plugin.gd:23).
+TICKET_MAX_LENGTH = 8
 
 
 def within_fixture(**constraints: Any) -> dict[str, Any]:
@@ -125,6 +145,17 @@ class BaristaMCPAutomationGateTests(unittest.TestCase):
         self.assertEqual(payload["generation"], 0)
         self.assertEqual(payload["handle"], "")
         self.assertNotIn("element", payload)
+        # The gate is read before the request is parsed, so a disabled session names no action and
+        # therefore declares no claim. A claim is never guessed from a request that was never parsed.
+        self.assertNotIn("action", payload)
+        self.assertNotIn("claim", payload)
+
+    def test_a_request_that_names_no_action_declares_no_claim(self) -> None:
+        """A claim is never guessed: a request that named no advertised action publishes none."""
+        payload = self.client.structured_tool(ACT_TOOL, {})
+        self.assertEqual(payload["status"], "automation_disabled")
+        self.assertNotIn("action", payload)
+        self.assertNotIn("claim", payload)
 
     def test_refusal_performs_no_action(self) -> None:
         before = read_counters(self.client)
@@ -264,7 +295,43 @@ class BaristaMCPActionTests(unittest.TestCase):
         output = tool["outputSchema"]
         self.assertEqual(tuple(output["properties"]["status"]["enum"]), ACTION_STATUSES)
         self.assertEqual(tuple(output["properties"]["route"]["enum"]), ACTION_ROUTES)
+        self.assertEqual(tuple(output["properties"]["claim"]["enum"]), ACTION_CLAIMS)
         self.assertIs(self.client.structured_tool("barista_status", {})["automation_enabled"], True)
+
+    def test_every_advertised_route_declares_a_claim(self) -> None:
+        """A route cannot be advertised without saying what its own 'ok' asserts.
+
+        The claim is what tells an agent whether it must observe the editor after the call, so it is
+        published per route in the advertised schema and repeated in every result. This is
+        parametrized over the whole advertised action vocabulary, so a route added later without a
+        declared claim fails here rather than shipping an undeclared one.
+        """
+        tool = self._tool()
+        entries = tool["_meta"]["action_claims"]
+        declared = {entry["action"]: entry["claim"] for entry in entries}
+        self.assertEqual(len(entries), len(declared))
+        self.assertEqual(tuple(entry["action"] for entry in entries), ADVERTISED_ACTIONS)
+        for action in ADVERTISED_ACTIONS:
+            with self.subTest(action=action):
+                self.assertIn(action, declared)
+                self.assertIn(declared[action], ACTION_CLAIMS)
+                self.assertEqual(declared[action], EXPECTED_ACTION_CLAIMS[action])
+        # The tool says in one sentence what "ok" means on a delivery route.
+        self.assertIn("delivered to the exact requested target", tool["description"])
+
+    def test_every_result_repeats_the_route_claim(self) -> None:
+        """The claim travels with the outcome, on a success and on a refusal alike."""
+        performed = self.act(selector=within_fixture(name="Order"), action="focus")
+        self.assertTrue(performed["ok"], performed)
+        self.assertEqual(performed["claim"], "effect")
+
+        refused = self.act(selector=within_fixture(role="button", name="Grind"), action="click")
+        self.assertIs(refused["ok"], False, refused)
+        self.assertEqual(refused["claim"], "delivery")
+
+        typed = self.act(selector=within_fixture(name="Notes"), action="type_text", text="x")
+        self.assertTrue(typed["ok"], typed)
+        self.assertEqual(typed["claim"], "delivery")
 
     def test_focus_uses_the_control_method_route(self) -> None:
         # Focus somewhere else first, so this test never depends on where focus already was.
@@ -391,12 +458,16 @@ class BaristaMCPActionTests(unittest.TestCase):
         self.assertEqual(self.counters()["clicks"], before["clicks"] + 1)
 
     def test_click_is_refused_when_a_descendant_would_consume_it(self) -> None:
-        """A click reports success only for the element that would actually receive it.
+        """A click reports success only for the element that would actually receive it, and a refused
+        click delivers nothing at all.
 
-        The fixture's "Shielded" button is covered by a child whose mouse filter stops input, so the
-        editor would hand the synthesized press to the child. Reporting a successful click on the
-        button would name an element the client never selected and never activated, so the action is
-        refused instead.
+        The fixture's "Shielded" button is covered by a child whose mouse filter stops input
+        (project/addons/barista_mcp_test_fixture/plugin.gd:72), so the editor would hand the
+        synthesized press to the child. Reporting a successful click on the button would name an
+        element the client never selected and never activated, so the action is refused instead --
+        and the refusal is decided before anything is dispatched, so the covering control observes
+        no input either. Issue #7 requires invalid states to produce errors without side effects,
+        and a probe that had to be dispatched to reach the refusal would itself be one.
         """
         before = self.counters()
         element = find_one(self.client, within_fixture(role="button", name="Shielded"))
@@ -407,6 +478,89 @@ class BaristaMCPActionTests(unittest.TestCase):
         self.assertEqual(result["route"], "none")
         self.assertIs(result["changed"], False)
         self.assertNotIn("element", result)
+        # The covering control counts every input event it receives. A refused click leaves it at
+        # exactly the count it had, so no input was delivered anywhere on the refusal path.
+        self.assertEqual(self.counters()["shield_input"], before["shield_input"])
+        self.assertEqual(self.counters(), before)
+
+    def test_click_is_refused_for_a_button_that_ignores_the_left_mouse_button(self) -> None:
+        """Delivery is a real obligation: the target must actually accept the input.
+
+        The fixture's "Right Only" button publishes a button_mask that excludes the left mouse
+        button (project/addons/barista_mcp_test_fixture/plugin.gd:83), and BaseButton drops a press
+        outside that mask before any handler sees it. Reporting "ok" for a press the target will not
+        accept would be a failed delivery reported as a success, so the click is refused.
+        """
+        before = self.counters()
+        element = find_one(self.client, within_fixture(role="button", name="Right Only"))
+        self.assertIn("click", element["actions"])
+        self.assertIs(element["enabled"], True)
+        result = self.act(selector=within_fixture(role="button", name="Right Only"), action="click")
+        self.assertIs(result["ok"], False, result)
+        self.assertEqual(result["status"], "element_not_interactable", result)
+        self.assertEqual(result["route"], "none")
+        self.assertIs(result["changed"], False)
+        self.assertNotIn("element", result)
+        self.assertEqual(result["claim"], "delivery")
+        self.assertEqual(self.counters(), before)
+
+    def test_typing_into_a_full_length_capped_field_is_refused(self) -> None:
+        """A field already holding its whole cap accepts no character, so typing into it is refused.
+
+        The cap is the field's own published max_length, produced by the real LineEdit the fixture
+        builds (project/addons/barista_mcp_test_fixture/plugin.gd:127) and republished as
+        state.max_length by the snapshot (src/editor_snapshot.cpp:205). type_text is a delivery
+        route, and delivery is still a real obligation: a target that will demonstrably reject the
+        characters is a failed delivery, not an "ok" with nothing entered.
+        """
+        full = "x" * TICKET_MAX_LENGTH
+        filled = self.act(selector=within_fixture(name="Ticket"), action="set_text", text=full)
+        self.assertTrue(filled["ok"], filled)
+        ticket = find_one(self.client, within_fixture(name="Ticket"))
+        self.assertEqual(ticket["state"]["max_length"], TICKET_MAX_LENGTH)
+        self.assertEqual(ticket["text"], full)
+
+        refused = self.act(selector=within_fixture(name="Ticket"), action="type_text", text="y")
+        self.assertIs(refused["ok"], False, refused)
+        self.assertEqual(refused["status"], "invalid_arguments", refused)
+        self.assertEqual(refused["route"], "none")
+        self.assertIs(refused["changed"], False)
+        self.assertNotIn("element", refused)
+        self.assertEqual(find_one(self.client, within_fixture(name="Ticket"))["text"], full)
+
+        # Refusing costs nothing the field can still hold: room freed is room typed into.
+        room = "x" * (TICKET_MAX_LENGTH - 1)
+        self.act(selector=within_fixture(name="Ticket"), action="set_text", text=room)
+        typed = self.act(selector=within_fixture(name="Ticket"), action="type_text", text="y")
+        self.assertTrue(typed["ok"], typed)
+        entered = find_one(self.client, within_fixture(name="Ticket"))["text"]
+        self.assertEqual(len(entered), TICKET_MAX_LENGTH)
+        self.assertEqual(sorted(entered), sorted(room + "y"))
+
+    def test_a_read_only_field_accepts_no_keyboard_delivery(self) -> None:
+        """A read-only field drops every character handed to it, so no keyboard route may claim it.
+
+        Same defect class as the full-field case: a delivery route may only report "ok" when the
+        exact requested target actually accepts the input. A read-only LineEdit publishes
+        enabled=false (src/editor_snapshot.cpp:283) and therefore advertises no action at all, so
+        both keyboard routes are refused before any event is pushed. The driver repeats the editable
+        check on its own, so the refusal does not depend on the capture having gated it.
+        """
+        before = self.counters()
+        receipt = find_one(self.client, within_fixture(name="Receipt"))
+        self.assertIs(receipt["state"]["editable"], False)
+        self.assertIs(receipt["enabled"], False)
+        self.assertEqual(receipt["actions"], [])
+        for action, arguments in (("type_text", {"text": "x"}), ("submit", {})):
+            with self.subTest(action=action):
+                refused = self.act(
+                    selector=within_fixture(name="Receipt"), action=action, **arguments
+                )
+                self.assertIs(refused["ok"], False, refused)
+                self.assertEqual(refused["status"], "element_not_interactable", refused)
+                self.assertEqual(refused["route"], "none")
+                self.assertEqual(refused["claim"], "delivery")
+        self.assertEqual(find_one(self.client, within_fixture(name="Receipt"))["text"], receipt["text"])
         self.assertEqual(self.counters(), before)
 
     def test_set_checked_and_set_value_and_tabs_and_items_and_scroll(self) -> None:
@@ -643,33 +797,50 @@ class BaristaMCPActionPortabilityTests(unittest.TestCase):
             "InputEventMouseMotion",
             "ScrollContainer",
             "Viewport",
+            "Window",
         )
         for class_name in required_classes:
             with self.subTest(engine_class=class_name):
                 self.assertIn(class_name, profile["enabled_classes"])
 
         required_methods = {
-            "BaseButton": ("is_pressed", "is_toggle_mode", "set_pressed"),
+            # get_button_mask is what lets a click refuse a target that would drop a left press.
+            "BaseButton": ("get_button_mask", "is_disabled", "is_pressed", "is_toggle_mode", "set_pressed"),
+            # get_mouse_filter_with_override and is_clipping_contents are what let the click route
+            # decide a refusal geometrically, without dispatching a probe event.
             "Control": (
                 "get_focus_mode",
                 "get_focus_mode_with_override",
                 "get_global_rect",
+                "get_mouse_filter",
+                "get_mouse_filter_with_override",
                 "grab_focus",
                 "has_focus",
+                "is_clipping_contents",
             ),
-            "CanvasItem": ("is_visible_in_tree",),
+            "CanvasItem": ("is_visible", "is_visible_in_tree"),
             "InputEventKey": ("set_keycode", "set_pressed", "set_unicode"),
             "InputEventMouse": ("set_button_mask", "set_global_position", "set_position"),
             "InputEventMouseButton": ("set_button_index", "set_pressed"),
             "ItemList": (
+                "deselect_all",
+                "get_selected_items",
                 "get_item_count",
                 "is_item_disabled",
                 "is_item_selectable",
                 "is_selected",
                 "select",
             ),
-            "LineEdit": ("get_max_length", "get_text", "is_editable", "set_text"),
-            "Node": ("get_viewport", "is_ancestor_of"),
+            "LineEdit": (
+                "get_max_length",
+                "get_selection_from_column",
+                "get_selection_to_column",
+                "get_text",
+                "has_selection",
+                "is_editable",
+                "set_text",
+            ),
+            "Node": ("get_child", "get_child_count", "get_viewport", "is_ancestor_of"),
             "OS": ("get_cmdline_user_args",),
             "ProjectSettings": ("get_setting",),
             "Range": (
@@ -699,7 +870,7 @@ class BaristaMCPActionPortabilityTests(unittest.TestCase):
                 "set_current_tab",
             ),
             "TextEdit": ("get_text", "is_editable", "set_text"),
-            "Viewport": ("gui_get_hovered_control", "push_input"),
+            "Viewport": ("gui_get_focus_owner", "gui_get_hovered_control", "push_input"),
         }
         for class_name, methods in required_methods.items():
             available = {method["name"] for method in classes[class_name].get("methods", [])}

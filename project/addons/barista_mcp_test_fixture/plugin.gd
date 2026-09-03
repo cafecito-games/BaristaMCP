@@ -34,6 +34,13 @@ var _counts := {
 	"toggles": 0,
 	"value_changes": 0,
 	"tab_changes": 0,
+	## Input events the covering overlay itself received. A refused click must leave this untouched:
+	## the refusal is decided before anything is dispatched, so the overlay observes nothing at all.
+	"shield_input": 0,
+	## Presses the right-button-only button received, and submissions the read-only field received.
+	## Both stay at zero: an action that the target would not accept is refused, never delivered.
+	"right_only_clicks": 0,
+	"receipt_submits": 0,
 }
 
 
@@ -78,8 +85,19 @@ func _enter_tree() -> void:
 	shield.color = Color(0.0, 0.0, 0.0, 0.0)
 	shield.mouse_filter = Control.MOUSE_FILTER_STOP
 	shield.set_anchors_preset(Control.PRESET_FULL_RECT)
+	shield.gui_input.connect(func(_event: InputEvent) -> void: _bump("shield_input"))
 	shielded.add_child(shield)
 	column.add_child(shielded)
+
+	## A button configured to react to the right mouse button only. A synthesized left press is
+	## dropped by BaseButton before any handler sees it, so delivering one would be a delivery this
+	## target never accepts and the click must be refused instead.
+	var right_only := Button.new()
+	right_only.name = "Right Only Button"
+	right_only.text = "Right Only"
+	right_only.button_mask = MOUSE_BUTTON_MASK_RIGHT
+	right_only.pressed.connect(_bump.bind("right_only_clicks"))
+	column.add_child(right_only)
 
 	var recipes := LinkButton.new()
 	recipes.name = "Recipes Link"
@@ -126,6 +144,15 @@ func _enter_tree() -> void:
 	ticket.name = "Ticket"
 	ticket.max_length = TICKET_MAX_LENGTH
 	column.add_child(ticket)
+
+	## A read-only field. It drops every character handed to it, so typing into it can never be a
+	## delivery it accepts, while a submission still reaches its own key handling.
+	var receipt := LineEdit.new()
+	receipt.name = "Receipt"
+	receipt.editable = false
+	receipt.text = "receipt"
+	receipt.text_submitted.connect(func(_text: String) -> void: _bump("receipt_submits"))
+	column.add_child(receipt)
 
 	## A focusable field under an ancestor that disables focus for its whole subtree. The field still
 	## advertises "focus" from its own focus mode, but no call can make it own focus, so a focus

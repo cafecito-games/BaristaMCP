@@ -11,6 +11,7 @@
 #include "editor_action_driver.h"
 #include "editor_selector.h"
 #include "editor_snapshot.h"
+#include "mcp_contracts.h"
 
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/json.hpp>
@@ -657,6 +658,9 @@ Dictionary EditorAutomationService::act_ui(const Dictionary &p_arguments, String
 	payload["status"] = EditorActionDriver::status_name(EditorActionDriver::Status::OK);
 	payload["message"] = String();
 	payload["action"] = request.action;
+	// The claim this route was held to travels with the result, so an agent reads from the same payload
+	// whether "ok" means the requested state was verified or only that the input reached the target.
+	payload["claim"] = MCPContracts::action_claim(request.action);
 	payload["route"] = EditorActionDriver::route_name(route);
 	// "changed" is only ever what Barista can verify: whether the acted element's own published fields
 	// differ between the capture the action was decided on and the capture taken after it. An action

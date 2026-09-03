@@ -8,20 +8,26 @@
 
 #include "editor_action_driver.h"
 
+#include "mcp_contracts.h"
+
 #include <godot_cpp/classes/base_button.hpp>
+#include <godot_cpp/classes/canvas_item.hpp>
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/input_event_key.hpp>
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
 #include <godot_cpp/classes/input_event_mouse_motion.hpp>
 #include <godot_cpp/classes/item_list.hpp>
 #include <godot_cpp/classes/line_edit.hpp>
+#include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/classes/range.hpp>
 #include <godot_cpp/classes/scroll_container.hpp>
 #include <godot_cpp/classes/tab_bar.hpp>
 #include <godot_cpp/classes/tab_container.hpp>
 #include <godot_cpp/classes/text_edit.hpp>
 #include <godot_cpp/classes/viewport.hpp>
+#include <godot_cpp/classes/window.hpp>
 #include <godot_cpp/core/math.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/variant.hpp>
 
 namespace godot {
@@ -81,11 +87,61 @@ bool action_requires(const ActionArguments &p_entry, const String &p_argument) {
 	return false;
 }
 
+// Deepest node chain the geometric hit test walks. The editor's own control tree is far shallower,
+// and the bound keeps a pathological tree from recursing without limit.
+constexpr int MAX_HIT_TEST_DEPTH = 256;
+
+// The editor's GUI hit test, reproduced through public API only so that deciding to refuse a click
+// costs no dispatched input. It mirrors the engine's search order: a node's children first in reverse
+// draw order, then the node itself. An invisible node hides its whole subtree, a control that clips
+// its contents hides whatever falls outside its own rect, a control whose effective mouse filter
+// ignores input is never a target, and a Window owns a viewport of its own so its subtree belongs to
+// a different hit test. Point containment uses the control's global rect, which is what
+// Control::has_point tests unless a control overrides it; the engine's own answer is still consulted
+// before any press is delivered, so an override or a canvas transform this walk cannot see can only
+// turn an accepted click into a refusal, never into a click on the wrong element.
+Control *topmost_control_at(Node *p_node, const Vector2 &p_point, int p_depth) {
+	if (p_node == nullptr || p_depth > MAX_HIT_TEST_DEPTH || Object::cast_to<Window>(p_node) != nullptr) {
+		return nullptr;
+	}
+	CanvasItem *item = Object::cast_to<CanvasItem>(p_node);
+	if (item != nullptr && !item->is_visible()) {
+		return nullptr;
+	}
+	Control *control = Object::cast_to<Control>(p_node);
+	if (control != nullptr && control->is_clipping_contents() && !control->get_global_rect().has_point(p_point)) {
+		return nullptr;
+	}
+	for (int i = p_node->get_child_count(true) - 1; i >= 0; i--) {
+		Control *hit = topmost_control_at(p_node->get_child(i, true), p_point, p_depth + 1);
+		if (hit != nullptr) {
+			return hit;
+		}
+	}
+	if (control != nullptr && control->get_mouse_filter_with_override() != Control::MOUSE_FILTER_IGNORE &&
+			control->get_global_rect().has_point(p_point)) {
+		return control;
+	}
+	return nullptr;
+}
+
+// The control this viewport would hand a press at this point to, decided without dispatching
+// anything. A refusal built on this answer leaves no input behind in any control.
+Control *hit_target(Viewport *p_viewport, const Vector2 &p_point) {
+	for (int i = p_viewport->get_child_count(true) - 1; i >= 0; i--) {
+		Control *hit = topmost_control_at(p_viewport->get_child(i, true), p_point, 0);
+		if (hit != nullptr) {
+			return hit;
+		}
+	}
+	return nullptr;
+}
+
 // Moves the pointer over the element and reports whether that element itself is what the editor
 // would deliver a click to. Identity is exact: a descendant that stops propagation would consume the
 // press, so accepting one would activate a control the client never selected while reporting a
-// successful click on the one it did. Every role that advertises "click" is a BaseButton and is its
-// own hover target, so a click that lands anywhere else is refused rather than mis-attributed.
+// successful click on the one it did. This probe is itself a real mouse-motion event, so it is only
+// ever reached after hit_target() has already named this element.
 bool hover_reaches(Viewport *p_viewport, Control *p_control, const Vector2 &p_point) {
 	Ref<InputEventMouseMotion> motion;
 	motion.instantiate();
@@ -97,6 +153,14 @@ bool hover_reaches(Viewport *p_viewport, Control *p_control, const Vector2 &p_po
 		return false;
 	}
 	return hovered == p_control;
+}
+
+// Puts focus back where the editor had it. A route that grabs focus and then cannot complete must
+// leave the editor focused where it was, never on the element whose action was refused.
+void restore_focus(Control *p_previous_focus, Control *p_control) {
+	if (p_previous_focus != nullptr && p_previous_focus != p_control) {
+		p_previous_focus->grab_focus();
+	}
 }
 
 // Every input route resolves its viewport once, before the first event is pushed, so a multi-event
@@ -216,6 +280,12 @@ Dictionary EditorActionDriver::failure(Status p_status, const String &p_message,
 	payload["message"] = p_message;
 	if (!p_action.is_empty()) {
 		payload["action"] = p_action;
+		// The claim travels with every result, refusals included, so a client reads the standard this
+		// route was held to from the same payload that reports the outcome.
+		const String claim = MCPContracts::action_claim(p_action);
+		if (!claim.is_empty()) {
+			payload["claim"] = claim;
+		}
 	}
 	payload["route"] = route_name(Route::NONE);
 	payload["changed"] = false;
@@ -341,10 +411,19 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 			r_message = "The element cannot take keyboard focus.";
 			return false;
 		}
+		Viewport *viewport = p_control->get_viewport();
+		if (viewport == nullptr) {
+			r_status = Status::ELEMENT_NOT_INTERACTABLE;
+			r_message = "The element is not inside a viewport that accepts input.";
+			return false;
+		}
+		Control *previous_focus = viewport->gui_get_focus_owner();
 		p_control->grab_focus();
 		// The requested postcondition is that this exact element owns focus. Anything less is a
-		// failure, never a success reported against an element that never took focus.
+		// failure, never a success reported against an element that never took focus, and the refusal
+		// puts focus back where the editor had it rather than leaving it moved.
 		if (!p_control->has_focus()) {
+			restore_focus(previous_focus, p_control);
 			r_status = Status::ELEMENT_NOT_INTERACTABLE;
 			r_message = "The element refused keyboard focus.";
 			return false;
@@ -366,7 +445,27 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 			r_message = "The element is not inside a viewport that accepts input.";
 			return false;
 		}
+		// A button publishes the mouse buttons it reacts to. BaseButton drops a press whose button is
+		// outside that mask before it reaches any handler, so delivering one is a delivery the element
+		// does not accept, not a click the editor merely chose to ignore.
+		BaseButton *clicked_button = Object::cast_to<BaseButton>(p_control);
+		if (clicked_button != nullptr && !clicked_button->get_button_mask().has_flag(MOUSE_BUTTON_MASK_LEFT)) {
+			r_status = Status::ELEMENT_NOT_INTERACTABLE;
+			r_message = "The element does not accept the left mouse button.";
+			return false;
+		}
 		const Vector2 point = rect.get_center();
+		// Refusal is decided geometrically first, dispatching nothing, so a click Barista will not
+		// perform leaves no input behind in whatever control covers this one.
+		if (hit_target(viewport, point) != p_control) {
+			r_status = Status::ELEMENT_NOT_INTERACTABLE;
+			r_message = "The element does not receive pointer input at its own center.";
+			return false;
+		}
+		// The engine's own answer decides delivery. This probe is a real mouse-motion event, so it runs
+		// only once the geometric test has already named this element: the one residual, when the engine
+		// disagrees with the geometry, is a single motion event at a point the geometry attributed to
+		// this element, and never a button event.
 		if (!hover_reaches(viewport, p_control, point)) {
 			r_status = Status::ELEMENT_NOT_INTERACTABLE;
 			r_message = "The element does not receive pointer input at its own center.";
@@ -393,8 +492,12 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 				r_message = "The text field holds at most " + String::num_int64(max_length) + " characters.";
 				return false;
 			}
+			const String previous_text = line_edit->get_text();
 			line_edit->set_text(p_request.text);
 			if (line_edit->get_text() != p_request.text) {
+				// The refusal puts the field back the way it was: a request that cannot be reported as
+				// performed must not leave the editor holding a value nobody asked for.
+				line_edit->set_text(previous_text);
 				r_status = Status::ELEMENT_NOT_INTERACTABLE;
 				r_message = "The text field did not take the requested text.";
 				return false;
@@ -409,8 +512,12 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 				r_message = "The text area is not editable.";
 				return false;
 			}
+			const String previous_text = text_edit->get_text();
 			text_edit->set_text(p_request.text);
 			if (text_edit->get_text() != p_request.text) {
+				// TextEdit republishes its content line by line, so text it normalizes is text it did not
+				// take. The refusal restores what the area held rather than leaving the normalized value.
+				text_edit->set_text(previous_text);
 				r_status = Status::ELEMENT_NOT_INTERACTABLE;
 				r_message = "The text area did not take the requested text.";
 				return false;
@@ -431,16 +538,45 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 			r_message = "The element cannot take keyboard focus.";
 			return false;
 		}
-		// Typing claims every requested character reaches the focused element. A field that publishes
-		// a max_length can never hold the requested text whatever the caret does with it, so the
-		// request is refused before a single key event is pushed.
+		// Typing delivers characters to the focused element, so the element must be one that accepts
+		// them. Both refusals below are decided before a single event is pushed and before focus moves.
 		if (action == ACTION_TYPE_TEXT) {
 			LineEdit *typed_field = Object::cast_to<LineEdit>(p_control);
-			const int max_length = typed_field != nullptr ? typed_field->get_max_length() : 0;
-			if (max_length > 0 && p_request.text.length() > max_length) {
-				r_status = Status::INVALID_ARGUMENTS;
-				r_message = "The text field holds at most " + String::num_int64(max_length) + " characters.";
+			TextEdit *typed_area = Object::cast_to<TextEdit>(p_control);
+			// A read-only field drops every character handed to it, so typing into one is input the
+			// target does not accept, not a delivery the editor merely chose to ignore.
+			if ((typed_field != nullptr && !typed_field->is_editable()) ||
+					(typed_area != nullptr && !typed_area->is_editable())) {
+				r_status = Status::ELEMENT_NOT_INTERACTABLE;
+				r_message = "The text field is not editable.";
 				return false;
+			}
+			// LineEdit charges max_length against the whole field, not against the keystrokes: typing
+			// inserts at the caret and replaces the current selection, so what the field can still accept
+			// is the cap less what it already holds outside that selection. A field already at its cap
+			// accepts nothing, and typing into it would report a success with no character entered.
+			if (typed_field != nullptr) {
+				const int max_length = typed_field->get_max_length();
+				if (max_length > 0) {
+					int replaced = 0;
+					if (typed_field->has_selection()) {
+						replaced = typed_field->get_selection_to_column() - typed_field->get_selection_from_column();
+						if (replaced < 0) {
+							replaced = 0;
+						}
+					}
+					int retained = typed_field->get_text().length() - replaced;
+					if (retained < 0) {
+						retained = 0;
+					}
+					if (retained + p_request.text.length() > max_length) {
+						r_status = Status::INVALID_ARGUMENTS;
+						r_message = "The text field holds at most " + String::num_int64(max_length) +
+								" characters and already holds " + String::num_int64(retained) +
+								" the typed text would not replace.";
+						return false;
+					}
+				}
 			}
 		}
 		Viewport *viewport = p_control->get_viewport();
@@ -449,8 +585,10 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 			r_message = "The element is not inside a viewport that accepts input.";
 			return false;
 		}
+		Control *previous_focus = viewport->gui_get_focus_owner();
 		p_control->grab_focus();
 		if (!p_control->has_focus()) {
+			restore_focus(previous_focus, p_control);
 			r_status = Status::ELEMENT_NOT_INTERACTABLE;
 			r_message = "The element refused keyboard focus.";
 			return false;
@@ -476,8 +614,10 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 			r_message = "The element has no toggleable checked state.";
 			return false;
 		}
+		const bool previous_pressed = base_button->is_pressed();
 		base_button->set_pressed(p_request.checked);
 		if (base_button->is_pressed() != p_request.checked) {
+			base_button->set_pressed(previous_pressed);
 			r_status = Status::ELEMENT_NOT_INTERACTABLE;
 			r_message = "The element did not take the requested checked state.";
 			return false;
@@ -513,8 +653,10 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 						"the published step.";
 			return false;
 		}
+		const double previous_value = range->get_value();
 		range->set_value(p_request.value);
 		if (!Math::is_equal_approx(range->get_value(), p_request.value)) {
+			range->set_value(previous_value);
 			r_status = Status::ELEMENT_NOT_INTERACTABLE;
 			r_message = "The element did not take the requested value.";
 			return false;
@@ -540,8 +682,15 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 			r_message = "The item is disabled or not selectable.";
 			return false;
 		}
+		const PackedInt32Array previous_selection = item_list->get_selected_items();
 		item_list->select(p_request.index);
 		if (!item_list->is_selected(p_request.index)) {
+			// The refusal puts the selection back: an action reported as not performed must not leave the
+			// list selecting something the client never asked for.
+			item_list->deselect_all();
+			for (int i = 0; i < previous_selection.size(); i++) {
+				item_list->select(previous_selection[i], i == 0);
+			}
 			r_status = Status::ELEMENT_NOT_INTERACTABLE;
 			r_message = "The element did not select the requested item.";
 			return false;
@@ -573,6 +722,8 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 			r_message = "The tab is disabled or hidden.";
 			return false;
 		}
+		const int previous_tab =
+				tab_container != nullptr ? tab_container->get_current_tab() : tab_bar->get_current_tab();
 		if (tab_container != nullptr) {
 			tab_container->set_current_tab(p_request.index);
 		} else {
@@ -580,6 +731,13 @@ bool EditorActionDriver::perform(Control *p_control, const EditorElement &p_elem
 		}
 		const int current = tab_container != nullptr ? tab_container->get_current_tab() : tab_bar->get_current_tab();
 		if (current != p_request.index) {
+			// The refusal puts the element back on the tab it was showing rather than leaving it on one
+			// the action could not be reported as having reached.
+			if (tab_container != nullptr) {
+				tab_container->set_current_tab(previous_tab);
+			} else {
+				tab_bar->set_current_tab(previous_tab);
+			}
 			r_status = Status::ELEMENT_NOT_INTERACTABLE;
 			r_message = "The element did not move to the requested tab.";
 			return false;

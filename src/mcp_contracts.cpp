@@ -20,6 +20,28 @@ namespace godot {
 
 namespace {
 
+// What each action route's "ok" asserts. A delivery route promises the input reached the exact
+// requested target and nothing about the editor's response; an effect route promises the requested
+// state holds and verifies it before reporting success. Every advertised action appears here, and a
+// new one without an entry publishes no claim, which a contract test refuses.
+struct ActionClaimRule {
+	const char *action;
+	const char *claim;
+};
+
+const ActionClaimRule ACTION_CLAIM_RULES[] = {
+		{"click", MCPContracts::CLAIM_DELIVERY},
+		{"submit", MCPContracts::CLAIM_DELIVERY},
+		{"type_text", MCPContracts::CLAIM_DELIVERY},
+		{"focus", MCPContracts::CLAIM_EFFECT},
+		{"set_text", MCPContracts::CLAIM_EFFECT},
+		{"set_checked", MCPContracts::CLAIM_EFFECT},
+		{"set_value", MCPContracts::CLAIM_EFFECT},
+		{"select_item", MCPContracts::CLAIM_EFFECT},
+		{"select_tab", MCPContracts::CLAIM_EFFECT},
+		{"scroll", MCPContracts::CLAIM_EFFECT},
+};
+
 Dictionary status_output_schema() {
 	Dictionary schema = MCPSchema::object("Local server, protocol, and lifecycle status.");
 	MCPSchema::add_property(schema, "name", MCPSchema::string("Server name."), true);
@@ -248,7 +270,9 @@ Dictionary act_input_schema() {
 	MCPSchema::add_property(schema, "selector", selector_input_schema(), true);
 	MCPSchema::add_property(schema, "action",
 			MCPSchema::enum_string(EditorSnapshot::action_vocabulary(),
-					"Action to perform. It must appear in the target element's advertised 'actions'."),
+					"Action to perform. It must appear in the target element's advertised 'actions'. Each "
+					"action declares a claim in the tool's '_meta' action_claims entries and repeats it in "
+					"the result."),
 			true);
 	MCPSchema::add_property(schema, "text",
 			MCPSchema::string("Text for set_text and type_text. set_text accepts at most " +
@@ -302,6 +326,13 @@ Dictionary act_output_schema() {
 					"Public route the action used: a direct control method, a pushed input event, or none "
 					"when nothing was performed."),
 			true);
+	MCPSchema::add_property(schema, "claim",
+			MCPSchema::enum_string(MCPContracts::claim_vocabulary(),
+					"What 'ok' asserts for the requested action. 'delivery' asserts only that the input "
+					"reached the exact requested target, never that the editor did anything in response, so "
+					"the client must observe the editor itself; 'effect' asserts the requested state holds "
+					"and was verified. Absent when the request never named an advertised action."),
+			false);
 	MCPSchema::add_property(schema, "changed",
 			MCPSchema::boolean("Whether the acted element's own published fields differ between the capture the "
 							   "action was decided on and the capture taken after it."),
@@ -340,6 +371,36 @@ Dictionary make_resource(
 
 } // namespace
 
+PackedStringArray MCPContracts::claim_vocabulary() {
+	PackedStringArray claims;
+	claims.push_back(CLAIM_DELIVERY);
+	claims.push_back(CLAIM_EFFECT);
+	return claims;
+}
+
+String MCPContracts::action_claim(const String &p_action) {
+	for (const ActionClaimRule &rule : ACTION_CLAIM_RULES) {
+		if (p_action == rule.action) {
+			return rule.claim;
+		}
+	}
+	return String();
+}
+
+Array MCPContracts::build_action_claims() {
+	// Driven by the advertised action vocabulary, never by the rule table, so an action added without
+	// a declared claim publishes an entry with an empty claim rather than disappearing unnoticed.
+	Array entries;
+	const PackedStringArray actions = EditorSnapshot::action_vocabulary();
+	for (int i = 0; i < actions.size(); i++) {
+		Dictionary entry;
+		entry["action"] = actions[i];
+		entry["claim"] = action_claim(actions[i]);
+		entries.push_back(entry);
+	}
+	return entries;
+}
+
 Array MCPContracts::build_tools_list(bool p_mutation_enabled) {
 	Array tools;
 	tools.push_back(make_tool("barista_status",
@@ -357,10 +418,18 @@ Array MCPContracts::build_tools_list(bool p_mutation_enabled) {
 			"Capture a bounded semantic snapshot of the stock Godot editor UI through public APIs.",
 			ui_snapshot_output_schema(), ui_snapshot_input_schema()));
 	if (p_mutation_enabled) {
-		tools.push_back(make_tool(ACT_TOOL_NAME,
+		Dictionary act = make_tool(ACT_TOOL_NAME,
 				"Act on the single editor UI element a selector names, through documented public Godot APIs. "
+				"Every action declares a claim: on a 'delivery' route (click, submit, type_text) 'ok' means "
+				"the input was delivered to the exact requested target, not that the editor did anything in "
+				"response, so the client must observe the editor itself, while on an 'effect' route 'ok' "
+				"means the requested state was verified to hold. "
 				"Mutating: enabled only when this session opted in before startup.",
-				act_output_schema(), act_input_schema()));
+				act_output_schema(), act_input_schema());
+		Dictionary meta;
+		meta["action_claims"] = build_action_claims();
+		act["_meta"] = meta;
+		tools.push_back(act);
 	}
 	return tools;
 }
