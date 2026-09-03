@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, Iterator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mcp_test_support import ROOT, EditorProcess, MCPClient  # noqa: E402
+from mcp_test_support import ROOT, EditorProcess, MCPClient, write_test_project  # noqa: E402
 
 PINNED_EXTENSION_API = ROOT / "godot-cpp" / "gdextension" / "extension_api-4-7.json"
 BUILD_PROFILE = ROOT / "build_profile.json"
@@ -245,6 +246,57 @@ class BaristaMCPUISnapshotTests(unittest.TestCase):
         self.assertEqual(structured["limits"]["payload_limit_bytes"], MAX_SNAPSHOT_PAYLOAD_BYTES)
         self.assertLessEqual(structured["element_count"], structured["limits"]["max_elements"])
 
+    def test_out_of_int64_range_numbers_are_rejected_at_the_boundary(self) -> None:
+        """A well-formed JSON number outside int64_t must never reach a narrowing conversion.
+
+        The bodies below are byte-faithful: they are the exact request text the transport JSON
+        parser consumes (producer: src/mcp_server.cpp:150), so the value arrives as the double the
+        real producer builds. The advertised range is produced by src/mcp_schema.cpp:231 and
+        enforced by src/mcp_schema.cpp:134; without it, `(int64_t)1e300` is undefined and the
+        applied limit differs between arm64 and x86-64.
+        """
+        properties = self._tool_schema()["inputSchema"]["properties"]
+        for option in ("max_depth", "max_elements"):
+            with self.subTest(option=option):
+                self.assertEqual(properties[option]["minimum"], -(2**63))
+                # The largest double strictly below 2^63, so every accepted value converts exactly.
+                self.assertEqual(properties[option]["maximum"], 2**63 - 1024)
+
+        request_id = 7100
+        for option in ("max_depth", "max_elements"):
+            for literal in ("1e300", "-1e300", "1.7976931348623157e308"):
+                with self.subTest(option=option, literal=literal):
+                    request_id += 1
+                    body = (
+                        '{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":'
+                        '{"name":"inspect_editor_ui","arguments":{"%s":%s}}}'
+                        % (request_id, option, literal)
+                    )
+                    status, response_body = self.client.raw_request(
+                        "POST",
+                        self.client.path,
+                        body,
+                        {
+                            "Authorization": f"Bearer {self.client.token}",
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                        },
+                    )
+                    self.assertEqual(status, 200)
+                    result = json.loads(response_body)["result"]
+                    self.assertIs(result["isError"], True)
+                    self.assertEqual(
+                        result["structuredContent"]["error"], "invalid_arguments"
+                    )
+
+        # A large value that is still representable stays accepted and clamps, so the boundary
+        # rejects only what it genuinely cannot convert.
+        representable = self.client.structured_tool(
+            "inspect_editor_ui", {"max_depth": 2**63 - 1024, "max_elements": 2**63 - 1024}
+        )
+        self.assertEqual(representable["limits"]["max_depth"], 32)
+        self.assertEqual(representable["limits"]["max_elements"], 2000)
+
     def test_malformed_arguments_are_rejected(self) -> None:
         for arguments in (
             {"max_depth": "8"},
@@ -260,6 +312,53 @@ class BaristaMCPUISnapshotTests(unittest.TestCase):
                 )["result"]
                 self.assertIs(result["isError"], True)
                 self.assertEqual(result["structuredContent"]["error"], "invalid_arguments")
+
+
+class BaristaMCPUISnapshotTraversalBudgetTests(unittest.TestCase):
+    """The traversal budget must bound per-parent child scans, not only recursion."""
+
+    # Every plain node costs one visit plus one parent scan, so this comfortably exceeds
+    # EditorSnapshotLimits::MAX_VISITED_NODES (src/editor_automation_types.h) and forces the budget
+    # to run out part way through a child list.
+    WIDE_INTERNAL_CHILDREN = 60_000
+
+    def test_wide_internal_child_lists_are_bounded_by_the_traversal_budget(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="barista-mcp-wide-fixture-") as temporary:
+            project_dir = Path(temporary)
+            write_test_project(
+                project_dir,
+                "[barista_mcp_test_fixture]\n"
+                f"wide_internal_children={self.WIDE_INTERNAL_CHILDREN}",
+                extra_plugins=("barista_mcp_test_fixture",),
+            )
+            editor = EditorProcess(project_dir)
+            try:
+                editor.start()
+                client = MCPClient(editor.wait_for_discovery(timeout=60.0))
+                client.initialize()
+
+                # Internal children are not scanned at all when they were not requested.
+                public = client.structured_tool("inspect_editor_ui", {"max_depth": 32})
+                self.assertFalse(public["limits"]["traversal_limit_reached"])
+                self.assertFalse(public["limits"]["include_internal"])
+
+                # Exhaustion happens part way through a parent's child scan. The published
+                # contract must stay honest there, and the request must still answer inside the
+                # client socket timeout with the whole scan charged to the budget.
+                internal = client.structured_tool(
+                    "inspect_editor_ui", {"max_depth": 32, "include_internal": True}
+                )
+                self.assertTrue(internal["limits"]["traversal_limit_reached"])
+                self.assertTrue(internal["truncated"])
+                self.assertLessEqual(
+                    internal["element_count"], internal["limits"]["max_elements"]
+                )
+                # Truncation is published on the tree as well as in the limits block.
+                self.assertTrue(
+                    [element for element in walk(internal["tree"]) if element["truncated"]]
+                )
+            finally:
+                editor.stop()
 
 
 class BaristaMCPUISnapshotPortabilityTests(unittest.TestCase):

@@ -11,6 +11,11 @@ extends EditorPlugin
 ## acceptance tests can assert stable roles, names, state, bounds, and actions.
 
 const FIXTURE_NAME := "Barista Test Fixture"
+## Total number of plain nodes in the internal filler subtree. Zero by default so the shared test
+## project is untouched; an acceptance project raises it to exercise the traversal budget against
+## many parents that each hold a wide child list.
+const WIDE_INTERNAL_CHILDREN_SETTING := "barista_mcp_test_fixture/wide_internal_children"
+const WIDE_INTERNAL_GROUP_SIZE := 250
 
 var _panel: PanelContainer = null
 
@@ -112,7 +117,30 @@ func _enter_tree() -> void:
 	stations.add_child(pour_over)
 	column.add_child(stations)
 
+	_add_wide_internal_subtree()
+
 	base_control.add_child(_panel)
+
+
+## Builds a large internal subtree of plain nodes: many parents, each holding a wide child list.
+## Nodes that are neither controls nor windows emit no element yet still consume traversal budget,
+## so this is the shape that forces a snapshot to run out of budget part way through a child scan.
+func _add_wide_internal_subtree() -> void:
+	var total := int(ProjectSettings.get_setting(WIDE_INTERNAL_CHILDREN_SETTING, 0))
+	if total <= 0:
+		return
+	var filler_root := Node.new()
+	filler_root.name = "Filler Root"
+	var group: Node = null
+	for index in total:
+		if index % WIDE_INTERNAL_GROUP_SIZE == 0:
+			group = Node.new()
+			group.name = "Filler Group %d" % (index / WIDE_INTERNAL_GROUP_SIZE)
+			filler_root.add_child(group)
+		var filler := Node.new()
+		filler.name = "Filler %d" % index
+		group.add_child(filler)
+	_panel.add_child(filler_root, false, Node.INTERNAL_MODE_BACK)
 
 
 func _exit_tree() -> void:

@@ -11,6 +11,8 @@
 #include <godot_cpp/core/math.hpp>
 #include <godot_cpp/variant/array.hpp>
 
+#include <cstdint>
+
 namespace godot {
 
 namespace {
@@ -22,6 +24,30 @@ Dictionary make_schema(const String &p_type, const String &p_description) {
 		schema["description"] = p_description;
 	}
 	return schema;
+}
+
+// The range an "integer" schema promises. JSON carries every number as a double, so a well-formed
+// integral number can still sit outside int64_t; converting such a value is undefined and diverges
+// between architectures (arm64 saturates, x86-64 yields INT64_MIN). The boundary rejects it instead.
+// -2^63 is exactly representable as a double; the largest double strictly below 2^63 is 2^63 - 1024.
+constexpr int64_t INTEGER_MINIMUM = -9223372036854775807LL - 1LL;
+constexpr int64_t INTEGER_MAXIMUM = 9223372036854774784LL;
+
+// Compares a validated numeric value against a schema bound without narrowing either side: integers
+// are compared as integers and floats as doubles.
+bool violates_bound(const Dictionary &p_schema, const String &p_key, const Variant &p_value, bool p_is_maximum) {
+	if (!p_schema.has(p_key)) {
+		return false;
+	}
+	const Variant bound = p_schema.get(p_key, Variant());
+	if (p_value.get_type() == Variant::INT && bound.get_type() == Variant::INT) {
+		const int64_t value = p_value;
+		const int64_t limit = bound;
+		return p_is_maximum ? value > limit : value < limit;
+	}
+	const double value = p_value;
+	const double limit = bound;
+	return p_is_maximum ? value > limit : value < limit;
 }
 
 bool matches_type(const String &p_type, const Variant &p_value, bool &r_known_type) {
@@ -103,6 +129,11 @@ bool validate_against(const Dictionary &p_root, const Dictionary &p_schema, cons
 			}
 			return false;
 		}
+	}
+
+	if (violates_bound(schema, "minimum", p_value, false) || violates_bound(schema, "maximum", p_value, true)) {
+		r_error = p_path + String(" is outside the advertised numeric range.");
+		return false;
 	}
 
 	if (type == "object") {
@@ -198,7 +229,11 @@ Dictionary MCPSchema::string(const String &p_description) {
 }
 
 Dictionary MCPSchema::integer(const String &p_description) {
-	return make_schema("integer", p_description);
+	Dictionary schema = make_schema("integer", p_description);
+	// Advertised, not implicit: a client can read the exact range this boundary accepts.
+	schema["minimum"] = INTEGER_MINIMUM;
+	schema["maximum"] = INTEGER_MAXIMUM;
+	return schema;
 }
 
 Dictionary MCPSchema::number(const String &p_description) {

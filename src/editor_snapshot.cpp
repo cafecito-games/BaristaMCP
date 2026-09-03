@@ -299,19 +299,45 @@ public:
 			r_truncated = true;
 			return;
 		}
+		// Scanning one parent's child list is itself work proportional to that list, so it is charged
+		// and bounded before any listing is walked. Otherwise a parent with an enormous child list
+		// keeps costing after the traversal budget is spent.
+		if (visited_nodes >= EditorSnapshotLimits::MAX_VISITED_NODES) {
+			data.traversal_limit_reached = true;
+			r_truncated = true;
+			return;
+		}
+		visited_nodes++;
+		const int remaining_budget = EditorSnapshotLimits::MAX_VISITED_NODES - visited_nodes;
+
 		std::unordered_set<uint64_t> public_children;
 		if (options.include_internal) {
 			const TypedArray<Node> visible_children = p_parent->get_children(false);
-			for (int i = 0; i < visible_children.size(); i++) {
+			const int64_t visible_count = visible_children.size();
+			const int scanned = visible_count < (int64_t)remaining_budget ? (int)visible_count : remaining_budget;
+			for (int i = 0; i < scanned; i++) {
 				Node *child = Object::cast_to<Node>(visible_children[i]);
 				if (child != nullptr) {
 					public_children.insert((uint64_t)child->get_instance_id());
 				}
 			}
+			if ((int64_t)scanned < visible_count) {
+				// An incomplete public listing cannot classify the remaining children, so stop here
+				// rather than publish a guess about which of them are internal.
+				data.traversal_limit_reached = true;
+				r_truncated = true;
+				return;
+			}
 		}
 
 		const TypedArray<Node> children = p_parent->get_children(options.include_internal);
-		for (int i = 0; i < children.size(); i++) {
+		const int64_t child_count = children.size();
+		const int visitable = child_count < (int64_t)remaining_budget ? (int)child_count : remaining_budget;
+		if ((int64_t)visitable < child_count) {
+			data.traversal_limit_reached = true;
+			r_truncated = true;
+		}
+		for (int i = 0; i < visitable; i++) {
 			// A node can leave the tree between the child listing and this read; skip it instead of
 			// dereferencing a stale entry.
 			Node *child = Object::cast_to<Node>(children[i]);

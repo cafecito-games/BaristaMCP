@@ -38,8 +38,9 @@ void EditorAutomationService::configure(EditorInterface *p_editor_interface) {
 }
 
 EditorSnapshotOptions EditorAutomationService::parse_options(const Dictionary &p_arguments) {
-	// Types are rejected by the boundary schema before this runs; documented numeric ranges are
-	// clamped here so a client can never request an unbounded capture.
+	// Types and the int64_t representable range are both enforced by the boundary schema before this
+	// runs, so these conversions cannot narrow. The documented option ranges are clamped here so a
+	// client can never request an unbounded capture.
 	EditorSnapshotOptions options;
 	if (p_arguments.has("max_depth")) {
 		options.max_depth = clamp_int((int64_t)p_arguments.get("max_depth", options.max_depth),
