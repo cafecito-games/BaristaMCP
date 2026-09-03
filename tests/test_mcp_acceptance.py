@@ -158,6 +158,25 @@ class MCPClient:
 
 
 class BaristaMCPAcceptanceTests(unittest.TestCase):
+    def initialize_client(self, client: MCPClient) -> None:
+        response = client.rpc(
+            "initialize",
+            {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "barista-test", "version": "0.1"},
+            },
+        )
+        self.assertNotIn("error", response)
+        status, body = client.request(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {},
+            }
+        )
+        self.assertEqual((status, body), (202, ""))
+
     def test_discovery(self) -> None:
         editor = EditorProcess()
         try:
@@ -260,6 +279,66 @@ class BaristaMCPAcceptanceTests(unittest.TestCase):
                 b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 9000000\r\n\r\n"
             )
             self.assertEqual(status, 413)
+        finally:
+            editor.stop()
+
+    def test_tools_list_and_call(self) -> None:
+        editor = EditorProcess()
+        try:
+            editor.start()
+            client = MCPClient(editor.wait_for_discovery())
+            self.initialize_client(client)
+
+            listed = client.rpc("tools/list", {})
+            self.assertIn("result", listed, listed)
+            tools = listed["result"]["tools"]
+            self.assertEqual([tool["name"] for tool in tools], ["barista_status", "get_project_info"])
+            for tool in tools:
+                self.assertEqual(tool["inputSchema"]["type"], "object")
+                self.assertEqual(tool["inputSchema"]["properties"], {})
+                self.assertEqual(tool["inputSchema"]["required"], [])
+                self.assertIs(tool["inputSchema"]["additionalProperties"], False)
+
+            status_result = client.rpc(
+                "tools/call", {"name": "barista_status", "arguments": {}}
+            )["result"]
+            self.assertIs(status_result["isError"], False)
+            self.assertEqual(
+                json.loads(status_result["content"][0]["text"]),
+                status_result["structuredContent"],
+            )
+            status = status_result["structuredContent"]
+            self.assertEqual(status["name"], "BaristaMCP")
+            self.assertEqual(status["version"], "0.1.0")
+            self.assertEqual(status["protocol_version"], "2025-11-25")
+            self.assertIs(status["initialized"], True)
+            self.assertIs(status["local_only"], True)
+            self.assertEqual(status["endpoint"], f"http://127.0.0.1:{status['port']}/mcp")
+            self.assertNotIn("token", status)
+
+            project_result = client.rpc(
+                "tools/call", {"name": "get_project_info", "arguments": {}}
+            )["result"]
+            self.assertIs(project_result["isError"], False)
+            project = project_result["structuredContent"]
+            self.assertEqual(project["project_name"], "BaristaMCP Test Project")
+            self.assertEqual(Path(project["project_path"]).resolve(), PROJECT_DIR.resolve())
+            self.assertRegex(project["godot_version"]["string"], r"^4\.7(?:\.|$)")
+            self.assertEqual(project["current_scene"], "")
+            self.assertIs(project["is_playing"], False)
+
+            missing_name = client.rpc("tools/call", {"arguments": {}})
+            self.assertEqual(missing_name["error"]["code"], -32602)
+            wrong_arguments = client.rpc(
+                "tools/call", {"name": "barista_status", "arguments": []}
+            )
+            self.assertEqual(wrong_arguments["error"]["code"], -32602)
+            unknown = client.rpc("tools/call", {"name": "unknown", "arguments": {}})["result"]
+            self.assertIs(unknown["isError"], True)
+            rejected = client.rpc(
+                "tools/call", {"name": "barista_status", "arguments": {"extra": True}}
+            )["result"]
+            self.assertIs(rejected["isError"], True)
         finally:
             editor.stop()
 

@@ -11,6 +11,8 @@
 
 namespace godot {
 
+class EditorInterface;
+
 class MCPServer {
 	struct HTTPRequest {
 		String method;
@@ -36,6 +38,7 @@ class MCPServer {
 	int content_length = -1;
 	uint64_t connection_started_ms = 0;
 	MCPDispatcher dispatcher;
+	EditorInterface *editor_interface = nullptr;
 
 	void _accept_connection();
 	void _reset_connection();
@@ -53,6 +56,7 @@ public:
 	~MCPServer();
 
 	Error start(uint16_t p_port, uint64_t p_request_timeout_ms, int p_max_request_bytes);
+	void set_editor_interface(EditorInterface *p_editor_interface);
 	void poll();
 	void stop();
 

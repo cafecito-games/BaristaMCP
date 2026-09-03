@@ -91,8 +91,35 @@ Dictionary MCPDispatcher::handle_message(const Dictionary &p_message, bool &r_ha
 	if (method == "ping") {
 		return _make_result(id, Dictionary());
 	}
+	if (method == "tools/list") {
+		Dictionary result;
+		result["tools"] = MCPContracts::build_tools_list();
+		return _make_result(id, result);
+	}
+	if (method == "tools/call") {
+		if (!p_message.has("params") || p_message.get("params", Variant()).get_type() != Variant::DICTIONARY) {
+			return _make_error(id, INVALID_PARAMS, "tools/call requires object params.");
+		}
+		const Dictionary params = p_message.get("params", Variant());
+		if (!params.has("name") || params.get("name", Variant()).get_type() != Variant::STRING ||
+				String(params.get("name", Variant())).is_empty()) {
+			return _make_error(id, INVALID_PARAMS, "tools/call requires a non-empty string 'name'.");
+		}
+		Dictionary arguments;
+		if (params.has("arguments")) {
+			if (params.get("arguments", Variant()).get_type() != Variant::DICTIONARY) {
+				return _make_error(id, INVALID_PARAMS, "tools/call 'arguments' must be an object.");
+			}
+			arguments = params.get("arguments", Variant());
+		}
+		return _make_result(id, tool_provider.call(params.get("name", Variant()), arguments, initialized));
+	}
 
 	return _make_error(id, METHOD_NOT_FOUND, "Unknown method '" + method + "'.");
+}
+
+void MCPDispatcher::configure_tools(EditorInterface *p_editor_interface, const String &p_endpoint, int p_port) {
+	tool_provider.configure(p_editor_interface, p_endpoint, p_port);
 }
 
 bool MCPDispatcher::is_initialized() const {

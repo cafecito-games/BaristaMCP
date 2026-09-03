@@ -43,7 +43,12 @@ Error MCPServer::start(uint16_t p_port, uint64_t p_request_timeout_ms, int p_max
 	port = listener->get_local_port();
 	request_timeout_ms = p_request_timeout_ms;
 	max_request_bytes = p_max_request_bytes;
+	dispatcher.configure_tools(editor_interface, get_endpoint(), port);
 	return OK;
+}
+
+void MCPServer::set_editor_interface(EditorInterface *p_editor_interface) {
+	editor_interface = p_editor_interface;
 }
 
 void MCPServer::_accept_connection() {

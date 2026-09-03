@@ -55,6 +55,7 @@ void BaristaMCPPlugin::_start_server() {
 		return;
 	}
 
+	server.set_editor_interface(get_editor_interface());
 	const Error error = server.start((uint16_t)port, (uint64_t)request_timeout_ms, (int)max_request_bytes);
 	if (error != OK) {
 		UtilityFunctions::printerr("BaristaMCP: failed to bind MCP server (error ", (int)error, ").");
