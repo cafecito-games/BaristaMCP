@@ -64,10 +64,39 @@ func _enter_tree() -> void:
 	disabled.disabled = true
 	column.add_child(disabled)
 
+	## A button whose own centre is covered by a child that stops mouse input. The child, not the
+	## button, is what the editor would hand a synthesized click to, so a click on the button must be
+	## refused rather than delivered to something the client never selected.
+	var shielded := Button.new()
+	shielded.name = "Shielded Button"
+	shielded.text = "Shielded"
+	shielded.custom_minimum_size = Vector2(0, 32)
+	var shield := ColorRect.new()
+	shield.name = "Shield Overlay"
+	shield.color = Color(0.0, 0.0, 0.0, 0.0)
+	shield.mouse_filter = Control.MOUSE_FILTER_STOP
+	shield.set_anchors_preset(Control.PRESET_FULL_RECT)
+	shielded.add_child(shield)
+	column.add_child(shielded)
+
 	var recipes := LinkButton.new()
 	recipes.name = "Recipes Link"
 	recipes.text = "Recipes"
 	column.add_child(recipes)
+
+	var origin := OptionButton.new()
+	origin.name = "Origin Select"
+	origin.set_accessibility_name("Origin Select")
+	origin.add_item("Colombia")
+	origin.add_item("Ethiopia")
+	column.add_child(origin)
+
+	var actions_menu := MenuButton.new()
+	actions_menu.name = "Actions Menu"
+	actions_menu.set_accessibility_name("Actions Menu")
+	actions_menu.text = "Actions"
+	actions_menu.get_popup().add_item("Refill")
+	column.add_child(actions_menu)
 
 	var grind := HSlider.new()
 	grind.name = "Grind Size"

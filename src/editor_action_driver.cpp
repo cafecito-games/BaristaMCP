@@ -81,9 +81,11 @@ bool action_requires(const ActionArguments &p_entry, const String &p_argument) {
 	return false;
 }
 
-// Moves the pointer over the element and reports whether the element, or one of its descendants, is
-// what the editor would actually deliver a click to. A click that would land on another control is
-// refused rather than mutating the wrong element.
+// Moves the pointer over the element and reports whether that element itself is what the editor
+// would deliver a click to. Identity is exact: a descendant that stops propagation would consume the
+// press, so accepting one would activate a control the client never selected while reporting a
+// successful click on the one it did. Every role that advertises "click" is a BaseButton and is its
+// own hover target, so a click that lands anywhere else is refused rather than mis-attributed.
 bool hover_reaches(Viewport *p_viewport, Control *p_control, const Vector2 &p_point) {
 	Ref<InputEventMouseMotion> motion;
 	motion.instantiate();
@@ -94,7 +96,7 @@ bool hover_reaches(Viewport *p_viewport, Control *p_control, const Vector2 &p_po
 	if (hovered == nullptr) {
 		return false;
 	}
-	return hovered == p_control || p_control->is_ancestor_of(hovered);
+	return hovered == p_control;
 }
 
 // Every input route resolves its viewport once, before the first event is pushed, so a multi-event

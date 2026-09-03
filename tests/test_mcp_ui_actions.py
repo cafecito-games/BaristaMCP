@@ -322,6 +322,25 @@ class BaristaMCPActionTests(unittest.TestCase):
         self.assertEqual(result["route"], "input_event")
         self.assertEqual(self.counters()["clicks"], before["clicks"] + 1)
 
+    def test_click_is_refused_when_a_descendant_would_consume_it(self) -> None:
+        """A click reports success only for the element that would actually receive it.
+
+        The fixture's "Shielded" button is covered by a child whose mouse filter stops input, so the
+        editor would hand the synthesized press to the child. Reporting a successful click on the
+        button would name an element the client never selected and never activated, so the action is
+        refused instead.
+        """
+        before = self.counters()
+        element = find_one(self.client, within_fixture(role="button", name="Shielded"))
+        self.assertIn("click", element["actions"])
+        result = self.act(selector=within_fixture(role="button", name="Shielded"), action="click")
+        self.assertIs(result["ok"], False, result)
+        self.assertEqual(result["status"], "element_not_interactable")
+        self.assertEqual(result["route"], "none")
+        self.assertIs(result["changed"], False)
+        self.assertNotIn("element", result)
+        self.assertEqual(self.counters(), before)
+
     def test_set_checked_and_set_value_and_tabs_and_items_and_scroll(self) -> None:
         before = self.counters()
         checked = self.act(selector=within_fixture(name="Decaf"), action="set_checked", checked=True)
@@ -588,6 +607,51 @@ class BaristaMCPActionPortabilityTests(unittest.TestCase):
 
         utilities = {entry["name"] for entry in api["utility_functions"]}
         self.assertIn("instance_from_id", utilities)
+
+
+class BaristaMCPClickableRoleTests(unittest.TestCase):
+    """Requiring the exact hover target loses no legitimate case.
+
+    Every role that advertises "click" in ACTION_RULES (src/editor_snapshot.cpp:85) is a BaseButton
+    subclass and so is itself what the editor hovers. This runs in its own editor because activating
+    an OptionButton or a MenuButton opens a popup over the fixture that later tests must not inherit.
+    """
+
+    editor: EditorProcess
+    client: MCPClient
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.editor = EditorProcess(extra_args=("--", AUTOMATION_ARGUMENT))
+        try:
+            cls.editor.start()
+            cls.client = MCPClient(cls.editor.wait_for_discovery())
+            cls.client.initialize()
+        except Exception:
+            cls.editor.stop()
+            raise
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.editor.stop()
+
+    def test_every_advertised_clickable_role_still_clicks(self) -> None:
+        cases = {
+            "button": "Brew",
+            "checkbox": "Decaf",
+            "option_button": "Origin Select",
+            "menu_button": "Actions Menu",
+        }
+        for role, name in cases.items():
+            with self.subTest(role=role):
+                element = find_one(self.client, within_fixture(role=role, name=name))
+                self.assertIn("click", element["actions"])
+                result = self.client.structured_tool(
+                    ACT_TOOL,
+                    {"selector": within_fixture(role=role, name=name), "action": "click"},
+                )
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["route"], "input_event")
 
 
 if __name__ == "__main__":
