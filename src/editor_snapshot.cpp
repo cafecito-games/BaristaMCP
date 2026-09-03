@@ -23,6 +23,7 @@
 #include <godot_cpp/classes/popup_menu.hpp>
 #include <godot_cpp/classes/range.hpp>
 #include <godot_cpp/classes/rich_text_label.hpp>
+#include <godot_cpp/classes/scroll_container.hpp>
 #include <godot_cpp/classes/slider.hpp>
 #include <godot_cpp/classes/spin_box.hpp>
 #include <godot_cpp/classes/tab_bar.hpp>
@@ -92,7 +93,9 @@ const ActionRule ACTION_RULES[] = {
 		{"spin_box", {"focus", "set_value", nullptr, nullptr, nullptr}},
 		{"slider", {"focus", "set_value", nullptr, nullptr, nullptr}},
 		{"list", {"focus", "select_item", nullptr, nullptr, nullptr}},
-		{"tree", {"focus", "select_item", nullptr, nullptr, nullptr}},
+		// Tree item selection has no bounded public route that does not walk TreeItem objects, so a Tree
+		// advertises only what a client can actually invoke.
+		{"tree", {"focus", nullptr, nullptr, nullptr, nullptr}},
 		{"tab_container", {"focus", "select_tab", nullptr, nullptr, nullptr}},
 		{"tab_bar", {"focus", "select_tab", nullptr, nullptr, nullptr}},
 		{"scroll_container", {"scroll", nullptr, nullptr, nullptr, nullptr}},
@@ -198,6 +201,9 @@ Dictionary control_state(Control *p_control, const String &p_role) {
 		state["editable"] = line_edit->is_editable();
 		state["secret"] = line_edit->is_secret();
 		state["text_length"] = line_edit->get_text().length();
+		// The field's own length cap is part of the contract a set_text or type_text request is
+		// checked against, so it is published rather than left for the client to discover by refusal.
+		state["max_length"] = line_edit->get_max_length();
 	}
 	TextEdit *text_edit = Object::cast_to<TextEdit>(p_control);
 	if (text_edit != nullptr) {
@@ -234,6 +240,13 @@ Dictionary control_state(Control *p_control, const String &p_role) {
 	if (tab_bar != nullptr) {
 		state["tab_count"] = tab_bar->get_tab_count();
 		state["current_tab"] = tab_bar->get_current_tab();
+	}
+	// The scroll offsets are the only public state a scroll action changes, so an element that
+	// advertises "scroll" also publishes what that action moves.
+	ScrollContainer *scroll_container = Object::cast_to<ScrollContainer>(p_control);
+	if (scroll_container != nullptr) {
+		state["scroll_horizontal"] = scroll_container->get_h_scroll();
+		state["scroll_vertical"] = scroll_container->get_v_scroll();
 	}
 	return state;
 }

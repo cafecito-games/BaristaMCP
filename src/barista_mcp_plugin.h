@@ -23,6 +23,8 @@ class BaristaMCPPlugin : public EditorPlugin {
 	MCPServer server;
 
 	void _define_project_settings();
+	// Reads the frozen mutation mode from the project setting and the documented user arguments.
+	static bool _read_automation_enabled();
 	void _start_server();
 
 protected:

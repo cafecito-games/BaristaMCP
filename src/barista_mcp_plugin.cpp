@@ -9,6 +9,7 @@
 #include "barista_mcp_plugin.h"
 
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
@@ -20,6 +21,10 @@ constexpr const char *SETTING_ENABLED = "barista_mcp/server/enabled";
 constexpr const char *SETTING_PORT = "barista_mcp/server/port";
 constexpr const char *SETTING_REQUEST_TIMEOUT_MS = "barista_mcp/server/request_timeout_ms";
 constexpr const char *SETTING_MAX_REQUEST_BYTES = "barista_mcp/server/max_request_bytes";
+// Editor mutation is a separate opt-in from running the server at all, and it defaults to off.
+constexpr const char *SETTING_AUTOMATION_ENABLED = "barista_mcp/automation/enabled";
+// The only user argument that enables mutation, matched exactly. It is read once, at startup.
+constexpr const char *AUTOMATION_ARGUMENT = "--barista-mcp-automation";
 
 void define_setting(const String &p_name, const Variant &p_default, Variant::Type p_type,
 		PropertyHint p_hint = PROPERTY_HINT_NONE, const String &p_hint_string = String()) {
@@ -46,6 +51,27 @@ void BaristaMCPPlugin::_define_project_settings() {
 	define_setting(SETTING_PORT, 0, Variant::INT, PROPERTY_HINT_RANGE, "0,65535,1");
 	define_setting(SETTING_REQUEST_TIMEOUT_MS, 30000, Variant::INT, PROPERTY_HINT_RANGE, "1,300000,1");
 	define_setting(SETTING_MAX_REQUEST_BYTES, 8 * 1024 * 1024, Variant::INT, PROPERTY_HINT_RANGE, "1024,16777216,1");
+	define_setting(SETTING_AUTOMATION_ENABLED, false, Variant::BOOL);
+}
+
+bool BaristaMCPPlugin::_read_automation_enabled() {
+	// A setting of the wrong type is not an opt-in: only a boolean true enables mutation.
+	const Variant automation_value = ProjectSettings::get_singleton()->get_setting(SETTING_AUTOMATION_ENABLED, false);
+	if (automation_value.get_type() == Variant::BOOL && (bool)automation_value) {
+		return true;
+	}
+	OS *os = OS::get_singleton();
+	if (os == nullptr) {
+		return false;
+	}
+	// Only an exact user argument counts; a prefix or a value-carrying variant of it does not.
+	const PackedStringArray user_arguments = os->get_cmdline_user_args();
+	for (int i = 0; i < user_arguments.size(); i++) {
+		if (user_arguments[i] == AUTOMATION_ARGUMENT) {
+			return true;
+		}
+	}
+	return false;
 }
 
 void BaristaMCPPlugin::_start_server() {
@@ -72,7 +98,8 @@ void BaristaMCPPlugin::_start_server() {
 		return;
 	}
 
-	automation_service.configure(get_editor_interface());
+	// Mutation mode is decided once, here, and is never reconsidered while the server runs.
+	automation_service.configure(get_editor_interface(), _read_automation_enabled());
 	server.set_editor_interface(get_editor_interface());
 	server.set_automation_service(&automation_service);
 	const Error error = server.start((uint16_t)port, (uint64_t)request_timeout_ms, (int)max_request_bytes);
@@ -86,6 +113,7 @@ void BaristaMCPPlugin::_start_server() {
 	discovery["endpoint"] = server.get_endpoint();
 	discovery["token"] = server.get_token();
 	discovery["local_only"] = true;
+	discovery["automation_enabled"] = automation_service.is_automation_enabled();
 	UtilityFunctions::print("BARISTA_MCP " + JSON::stringify(discovery, "", false));
 }
 

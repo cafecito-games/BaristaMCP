@@ -8,6 +8,7 @@
 
 #include "mcp_contracts.h"
 
+#include "editor_action_driver.h"
 #include "editor_automation_types.h"
 #include "editor_selector.h"
 #include "editor_snapshot.h"
@@ -19,6 +20,28 @@ namespace godot {
 
 namespace {
 
+// What each action route's "ok" asserts. A delivery route promises the input reached the exact
+// requested target and nothing about the editor's response; an effect route promises the requested
+// state holds and verifies it before reporting success. Every advertised action appears here, and a
+// new one without an entry publishes no claim, which a contract test refuses.
+struct ActionClaimRule {
+	const char *action;
+	const char *claim;
+};
+
+const ActionClaimRule ACTION_CLAIM_RULES[] = {
+		{"click", MCPContracts::CLAIM_DELIVERY},
+		{"submit", MCPContracts::CLAIM_DELIVERY},
+		{"type_text", MCPContracts::CLAIM_DELIVERY},
+		{"focus", MCPContracts::CLAIM_EFFECT},
+		{"set_text", MCPContracts::CLAIM_EFFECT},
+		{"set_checked", MCPContracts::CLAIM_EFFECT},
+		{"set_value", MCPContracts::CLAIM_EFFECT},
+		{"select_item", MCPContracts::CLAIM_EFFECT},
+		{"select_tab", MCPContracts::CLAIM_EFFECT},
+		{"scroll", MCPContracts::CLAIM_EFFECT},
+};
+
 Dictionary status_output_schema() {
 	Dictionary schema = MCPSchema::object("Local server, protocol, and lifecycle status.");
 	MCPSchema::add_property(schema, "name", MCPSchema::string("Server name."), true);
@@ -29,6 +52,10 @@ Dictionary status_output_schema() {
 			schema, "local_only", MCPSchema::boolean("Always true; the server binds loopback only."), true);
 	MCPSchema::add_property(schema, "endpoint", MCPSchema::string("Loopback MCP endpoint URL."), true);
 	MCPSchema::add_property(schema, "port", MCPSchema::integer("Bound loopback TCP port."), true);
+	MCPSchema::add_property(schema, "automation_enabled",
+			MCPSchema::boolean("Whether editor mutation was enabled before startup. Frozen for the life of "
+							   "the server."),
+			true);
 	return schema;
 }
 
@@ -234,6 +261,96 @@ Dictionary editor_state_output_schema() {
 	return schema;
 }
 
+Dictionary act_input_schema() {
+	Dictionary schema = MCPSchema::object(
+			"One action against the single editor element a selector names. The selector must name "
+			"exactly one element: zero matches, several matches, and a truncated capture all refuse to "
+			"act. Every action-specific field belongs to exactly one action, and a field the requested "
+			"action does not use is rejected rather than ignored.");
+	MCPSchema::add_property(schema, "selector", selector_input_schema(), true);
+	MCPSchema::add_property(schema, "action",
+			MCPSchema::enum_string(EditorSnapshot::action_vocabulary(),
+					"Action to perform. It must appear in the target element's advertised 'actions'. Each "
+					"action declares a claim in the tool's '_meta' action_claims entries and repeats it in "
+					"the result."),
+			true);
+	MCPSchema::add_property(schema, "text",
+			MCPSchema::string("Text for set_text and type_text. set_text accepts at most " +
+					String::num_int64(EditorActionLimits::MAX_TEXT_LENGTH) + " characters and type_text at most " +
+					String::num_int64(EditorActionLimits::MAX_TYPED_LENGTH) +
+					", because typing pushes one public "
+					"input event per character. Text longer than the target field's own published "
+					"'max_length' is rejected rather than truncated."),
+			false);
+	MCPSchema::add_property(schema, "value",
+			MCPSchema::number("Numeric value for set_value. A value the element cannot hold exactly, whether "
+							  "outside its published range or off its published step, is rejected rather than "
+							  "clamped or snapped."),
+			false);
+	MCPSchema::add_property(schema, "checked", MCPSchema::boolean("Checked state for set_checked."), false);
+	MCPSchema::add_property(schema, "index",
+			MCPSchema::ranged_integer(EditorActionLimits::MIN_INDEX, EditorActionLimits::MAX_INDEX,
+					"Zero-based item or tab index for select_item and select_tab."),
+			false);
+	MCPSchema::add_property(schema, "scroll_axis",
+			MCPSchema::enum_string(EditorActionDriver::scroll_axis_vocabulary(), "Axis for scroll."), false);
+	MCPSchema::add_property(schema, "scroll_offset",
+			MCPSchema::ranged_integer(EditorActionLimits::MIN_SCROLL_OFFSET, EditorActionLimits::MAX_SCROLL_OFFSET,
+					"Scroll offset in pixels for scroll. An offset the element cannot reach is rejected and "
+					"leaves the element where it was, rather than reported as a scroll to a clamped offset."),
+			false);
+	MCPSchema::add_property(schema, "max_depth",
+			MCPSchema::integer("Maximum traversal depth of the capture the target is resolved against; clamped "
+							   "to the documented range."),
+			false);
+	MCPSchema::add_property(schema, "max_elements",
+			MCPSchema::integer("Maximum captured elements; clamped to the documented range."), false);
+	MCPSchema::add_property(schema, "include_internal",
+			MCPSchema::boolean("Include internal children, which are hidden by default."), false);
+	return schema;
+}
+
+Dictionary act_output_schema() {
+	Dictionary schema = MCPSchema::object("Result of one editor UI action.");
+	MCPSchema::add_property(schema, "ok", MCPSchema::boolean("True only when the status is 'ok'."), true);
+	MCPSchema::add_property(schema, "status",
+			MCPSchema::enum_string(EditorActionDriver::status_vocabulary(), "Action status for this request."), true);
+	MCPSchema::add_property(
+			schema, "message", MCPSchema::string("Bounded diagnostic, empty when the action succeeded."), true);
+	MCPSchema::add_property(schema, "action",
+			MCPSchema::enum_string(EditorSnapshot::action_vocabulary(),
+					"The requested action. Absent whenever the request was refused before it was parsed, "
+					"which covers both a request that named no advertised action and one refused by the "
+					"session gate or the per-request mutation budget before any action was read."),
+			false);
+	MCPSchema::add_property(schema, "route",
+			MCPSchema::enum_string(EditorActionDriver::route_vocabulary(),
+					"Public route the action used: a direct control method, a pushed input event, or none "
+					"when nothing was performed."),
+			true);
+	MCPSchema::add_property(schema, "claim",
+			MCPSchema::enum_string(MCPContracts::claim_vocabulary(),
+					"What 'ok' asserts for the requested action. 'delivery' asserts only that the input "
+					"reached the exact requested target, never that the editor did anything in response, so "
+					"the client must observe the editor itself; 'effect' asserts the requested state holds "
+					"and was verified. Absent exactly where 'action' is absent, because a claim is read from "
+					"the named action and is never guessed for a request that was never parsed."),
+			false);
+	MCPSchema::add_property(schema, "changed",
+			MCPSchema::boolean("Whether the acted element's own published fields differ between the capture the "
+							   "action was decided on and the capture taken after it."),
+			true);
+	MCPSchema::add_property(schema, "generation",
+			MCPSchema::integer("Capture taken after the action, or the capture the request was refused against, "
+							   "or 0 when nothing was captured."),
+			true);
+	MCPSchema::add_property(schema, "handle",
+			MCPSchema::string("Handle of the element acted on, or an empty string when none was resolved."), true);
+	MCPSchema::add_definition(schema, UI_MATCH_DEFINITION, ui_element_schema(false));
+	MCPSchema::add_property(schema, "element", MCPSchema::reference(UI_MATCH_DEFINITION), false);
+	return schema;
+}
+
 Dictionary make_tool(const String &p_name, const String &p_description, const Dictionary &p_output_schema,
 		const Dictionary &p_input_schema = MCPSchema::object()) {
 	Dictionary tool;
@@ -257,7 +374,37 @@ Dictionary make_resource(
 
 } // namespace
 
-Array MCPContracts::build_tools_list() {
+PackedStringArray MCPContracts::claim_vocabulary() {
+	PackedStringArray claims;
+	claims.push_back(CLAIM_DELIVERY);
+	claims.push_back(CLAIM_EFFECT);
+	return claims;
+}
+
+String MCPContracts::action_claim(const String &p_action) {
+	for (const ActionClaimRule &rule : ACTION_CLAIM_RULES) {
+		if (p_action == rule.action) {
+			return rule.claim;
+		}
+	}
+	return String();
+}
+
+Array MCPContracts::build_action_claims() {
+	// Driven by the advertised action vocabulary, never by the rule table, so an action added without
+	// a declared claim publishes an entry with an empty claim rather than disappearing unnoticed.
+	Array entries;
+	const PackedStringArray actions = EditorSnapshot::action_vocabulary();
+	for (int i = 0; i < actions.size(); i++) {
+		Dictionary entry;
+		entry["action"] = actions[i];
+		entry["claim"] = action_claim(actions[i]);
+		entries.push_back(entry);
+	}
+	return entries;
+}
+
+Array MCPContracts::build_tools_list(bool p_mutation_enabled) {
 	Array tools;
 	tools.push_back(make_tool("barista_status",
 			"Report the local BaristaMCP server and protocol status without exposing its bearer token.",
@@ -273,11 +420,25 @@ Array MCPContracts::build_tools_list() {
 	tools.push_back(make_tool("inspect_editor_ui",
 			"Capture a bounded semantic snapshot of the stock Godot editor UI through public APIs.",
 			ui_snapshot_output_schema(), ui_snapshot_input_schema()));
+	if (p_mutation_enabled) {
+		Dictionary act = make_tool(ACT_TOOL_NAME,
+				"Act on the single editor UI element a selector names, through documented public Godot APIs. "
+				"Every action declares a claim: on a 'delivery' route (click, submit, type_text) 'ok' means "
+				"the input was delivered to the exact requested target, not that the editor did anything in "
+				"response, so the client must observe the editor itself, while on an 'effect' route 'ok' "
+				"means the requested state was verified to hold. "
+				"Mutating: enabled only when this session opted in before startup.",
+				act_output_schema(), act_input_schema());
+		Dictionary meta;
+		meta["action_claims"] = build_action_claims();
+		act["_meta"] = meta;
+		tools.push_back(act);
+	}
 	return tools;
 }
 
-bool MCPContracts::find_tool(const String &p_name, Dictionary &r_tool) {
-	const Array tools = build_tools_list();
+bool MCPContracts::find_tool(const String &p_name, Dictionary &r_tool, bool p_mutation_enabled) {
+	const Array tools = build_tools_list(p_mutation_enabled);
 	for (int i = 0; i < tools.size(); i++) {
 		const Dictionary tool = tools[i];
 		if (String(tool.get("name", Variant())) == p_name) {

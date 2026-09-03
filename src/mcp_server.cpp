@@ -8,6 +8,8 @@
 
 #include "mcp_server.h"
 
+#include "editor_automation_service.h"
+
 #include <godot_cpp/classes/crypto.hpp>
 #include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/classes/marshalls.hpp>
@@ -58,7 +60,8 @@ Error MCPServer::start(uint16_t p_port, uint64_t p_request_timeout_ms, int p_max
 	port = listener->get_local_port();
 	request_timeout_ms = p_request_timeout_ms;
 	max_request_bytes = p_max_request_bytes;
-	dispatcher.configure_tools(editor_interface, automation_service, get_endpoint(), port);
+	dispatcher.configure_tools(editor_interface, automation_service, get_endpoint(), port,
+			automation_service != nullptr && automation_service->is_automation_enabled());
 	return OK;
 }
 
@@ -152,6 +155,9 @@ MCPServer::HTTPResponse MCPServer::_process_json(const String &p_body) {
 		response.body = JSON::stringify(_json_rpc_error(MCPDispatcher::PARSE_ERROR, "Parse error."), "", false);
 		return response;
 	}
+
+	// One accepted HTTP request carries one mutation budget, whether it holds a single call or a batch.
+	dispatcher.begin_http_request();
 
 	const Variant data = json->get_data();
 	if (data.get_type() == Variant::ARRAY) {
