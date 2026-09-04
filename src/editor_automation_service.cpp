@@ -16,6 +16,7 @@
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/editor_file_system.hpp>
 #include <godot_cpp/classes/editor_interface.hpp>
+#include <godot_cpp/classes/editor_settings.hpp>
 #include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/script.hpp>
@@ -976,6 +977,19 @@ Dictionary EditorAutomationService::_run_operation(const EditorOperationRequest 
 	}
 
 	if (operation == "edit_script") {
+		// With an external script editor configured, edit_script launches that editor and the internal
+		// script editor's current script never changes, so the postcondition this route claims could
+		// never be observed. An operation whose completion cannot be verified refuses instead of
+		// launching something and reporting a pending state that will never settle.
+		const Ref<EditorSettings> editor_settings = editor_interface->get_editor_settings();
+		const String external_setting = "text_editor/external/use_external_editor";
+		if (editor_settings.is_valid() && editor_settings->has_setting(external_setting) &&
+				(bool)editor_settings->get_setting(external_setting)) {
+			return EditorStateReader::operation_failure(OperationStatus::UNSUPPORTED_CAPABILITY,
+					"This editor is configured to open scripts in an external editor, whose state Barista "
+					"cannot observe, so no script was opened.",
+					operation);
+		}
 		ScriptEditor *script_editor = editor_interface->get_script_editor();
 		if (script_editor == nullptr) {
 			return EditorStateReader::operation_failure(OperationStatus::UNSUPPORTED_CAPABILITY,

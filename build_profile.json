@@ -11,6 +11,7 @@
     "EditorInterface",
     "EditorPlugin",
     "EditorSelection",
+    "EditorSettings",
     "Engine",
     "FileAccess",
     "InputEvent",

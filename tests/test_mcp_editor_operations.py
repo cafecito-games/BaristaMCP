@@ -88,10 +88,11 @@ STATUS_COVERAGE = {
     "invalid_resource_type": "test_edit_script_rejects_a_resource_of_the_wrong_type",
     "conflicting_state": "test_reload_scene_requires_the_scene_to_be_open",
     "operation_failed": "BaristaMCPOperationWithoutASceneTests.test_scene_operations_fail_closed",
-    # No stock Godot 4.7 editor omits the script editor, so this fail-closed branch has no reachable
-    # trigger from a client. It is covered by the advertised vocabulary and by the refusal it produces
-    # being the same shape as every other one.
-    "unsupported_capability": "advertised vocabulary only; unreachable in a stock editor",
+    # Reached when the editor is configured to open scripts in an external editor, whose state
+    # Barista cannot observe. Editor settings are global to the machine rather than per-project, so
+    # the suite cannot set one without changing the developer's own editor; the branch is covered by
+    # the advertised vocabulary and by producing the same refusal shape as every other one.
+    "unsupported_capability": "edit_script with an external script editor configured; global setting, not set by tests",
     "mutation_already_handled": "test_one_request_spends_one_mutation",
 }
 
@@ -668,13 +669,37 @@ class BaristaMCPOperationWithoutASceneTests(unittest.TestCase):
 
 
 class BaristaMCPOperationPortabilityTests(unittest.TestCase):
+    def test_caret_argument_bases_match_the_engine_defaults(self) -> None:
+        """The engine's own published defaults are what fix the base of each caret argument.
+
+        EditorInterface::edit_script declares line's default as the sentinel -1 and column's default
+        as 0. A one-based column could not default to 0, and a zero-based line could not use -1 as a
+        "no line" sentinel, so line is advertised one-based and column zero-based and both are passed
+        through unchanged. If a later Godot changed either base it would have to change these
+        defaults, and this test would catch it rather than the caret quietly landing elsewhere.
+        """
+        api = json.loads(PINNED_EXTENSION_API.read_text(encoding="utf-8"))
+        classes = {entry["name"]: entry for entry in api["classes"]}
+        edit_script = next(
+            method
+            for method in classes["EditorInterface"]["methods"]
+            if method["name"] == "edit_script"
+        )
+        defaults = {
+            argument["name"]: argument.get("default_value")
+            for argument in edit_script["arguments"]
+        }
+        self.assertEqual(defaults["line"], "-1")
+        self.assertEqual(defaults["column"], "0")
+        self.assertEqual(defaults["grab_focus"], "true")
+
     def test_pinned_extension_api_covers_every_operation(self) -> None:
         """Portability evidence: every engine symbol an operation calls exists in the pinned public API."""
         api = json.loads(PINNED_EXTENSION_API.read_text(encoding="utf-8"))
         classes = {entry["name"]: entry for entry in api["classes"]}
         profile = json.loads(BUILD_PROFILE.read_text(encoding="utf-8"))
 
-        for class_name in ("FileAccess", "ResourceLoader", "ScriptEditor", "EditorInterface"):
+        for class_name in ("EditorSettings", "FileAccess", "ResourceLoader", "ScriptEditor", "EditorInterface"):
             with self.subTest(engine_class=class_name):
                 self.assertIn(class_name, profile["enabled_classes"])
                 self.assertIn(class_name, classes)
@@ -683,6 +708,7 @@ class BaristaMCPOperationPortabilityTests(unittest.TestCase):
             "EditorInterface": (
                 "edit_script",
                 "get_current_path",
+                "get_editor_settings",
                 "get_open_scenes",
                 "get_playing_scene",
                 "get_unsaved_scenes",
@@ -700,6 +726,7 @@ class BaristaMCPOperationPortabilityTests(unittest.TestCase):
             "ResourceLoader": ("exists", "get_recognized_extensions_for_type", "load"),
             "FileAccess": ("file_exists",),
             "ScriptEditor": ("get_current_script",),
+            "EditorSettings": ("get_setting", "has_setting"),
         }
         for class_name, methods in required_methods.items():
             available = {method["name"] for method in classes[class_name].get("methods", [])}
