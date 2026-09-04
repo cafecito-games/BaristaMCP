@@ -100,6 +100,10 @@ public:
 	// Only the unsaved scenes that are backed by a res:// file. A scene that has never been saved to a
 	// path cannot be saved without naming one, so it is never part of a save postcondition.
 	static PackedStringArray unsaved_scene_paths(EditorInterface *p_editor_interface);
+	// True when some open scene has unsaved changes and no res:// path yet. Saving such a scene needs
+	// a path the client never supplied, and the editor asks for one with a modal dialog, so it is a
+	// state a save operation refuses in rather than acts in.
+	static bool has_unsaved_untitled_scene(EditorInterface *p_editor_interface);
 	static String current_filesystem_path(EditorInterface *p_editor_interface);
 	static String current_script_path(EditorInterface *p_editor_interface);
 

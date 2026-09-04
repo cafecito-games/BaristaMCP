@@ -668,6 +668,15 @@ PackedStringArray EditorStateReader::unsaved_scene_paths(EditorInterface *p_edit
 	return unsaved;
 }
 
+bool EditorStateReader::has_unsaved_untitled_scene(EditorInterface *p_editor_interface) {
+	if (p_editor_interface == nullptr) {
+		return false;
+	}
+	// Every unsaved scene the editor reports that is not backed by a res:// file is one that has never
+	// been saved anywhere.
+	return p_editor_interface->get_unsaved_scenes().size() > unsaved_scene_paths(p_editor_interface).size();
+}
+
 String EditorStateReader::current_filesystem_path(EditorInterface *p_editor_interface) {
 	return p_editor_interface == nullptr ? String() : p_editor_interface->get_current_path();
 }

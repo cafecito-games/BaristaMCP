@@ -900,6 +900,16 @@ Dictionary EditorAutomationService::_run_operation(const EditorOperationRequest 
 	}
 
 	if (operation == "save_all_scenes") {
+		// An open scene that is dirty and has no path cannot be saved without one, and the editor asks
+		// the user for it with a modal dialog. That dialog is an effect outside this route's
+		// postcondition, and the scene stays dirty behind it, so the request is refused rather than
+		// reported as a save that completed.
+		if (EditorStateReader::has_unsaved_untitled_scene(editor_interface)) {
+			return EditorStateReader::operation_failure(OperationStatus::CONFLICTING_STATE,
+					"An open scene has unsaved changes and no res:// path, which the editor can only "
+					"resolve by asking for one; save it under a path first.",
+					operation);
+		}
 		editor_interface->save_all_scenes();
 		const PackedStringArray after = EditorStateReader::unsaved_scene_paths(editor_interface);
 		int remaining = 0;
