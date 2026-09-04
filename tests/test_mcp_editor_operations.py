@@ -68,7 +68,7 @@ OPERATION_OBSERVABLE_FIELDS = {
     "save_scene": "scenes.unsaved",
     "save_all_scenes": "scenes.unsaved",
     "open_scene": "scenes.current",
-    "reload_scene": "scenes.unsaved",
+    "reload_scene": "scenes",
     "play_current_scene": "play.is_playing",
     "play_main_scene": "play.is_playing",
     "play_scene": "play.playing_scene",
@@ -322,10 +322,10 @@ class BaristaMCPOperationTests(unittest.TestCase):
         self.assertEqual(tuple(properties["operation"]["enum"]), OPERATIONS)
         self.assertEqual(tool["inputSchema"]["required"], ["operation"])
         self.assertIs(tool["inputSchema"]["additionalProperties"], False)
-        # Every numeric boundary field publishes an explicit range, so an unrepresentable JSON number
-        # is rejected instead of being converted on its way to a fixed-width integer.
-        self.assertEqual((properties["line"]["minimum"], properties["line"]["maximum"]), (1, 1000000))
-        self.assertEqual((properties["column"]["minimum"], properties["column"]["maximum"]), (0, 100000))
+        # Caret line and column are deliberately not offered: the public API neither reports a caret
+        # back nor documents the base of those arguments, so no field here carries a meaning Barista
+        # cannot substantiate, and the tool has no numeric argument to range in the first place.
+        self.assertEqual(sorted(properties), ["grab_focus", "operation", "path"])
         output = tool["outputSchema"]
         self.assertEqual(tuple(output["properties"]["status"]["enum"]), OPERATION_STATUSES)
         self.assertEqual(tuple(output["properties"]["operation"]["enum"]), OPERATIONS)
@@ -358,7 +358,10 @@ class BaristaMCPOperationTests(unittest.TestCase):
             with self.subTest(operation=operation):
                 section, _, leaf = field.partition(".")
                 self.assertIn(section, state)
-                self.assertIn(leaf, state[section])
+                # A predicate that spans a whole section names the section; one that rests on a single
+                # field names that field. Either way the client reads it from read_editor_state.
+                if leaf:
+                    self.assertIn(leaf, state[section])
 
     def test_every_status_has_named_coverage(self) -> None:
         """Vocabulary closure: one definition of the status vocabulary, and no unexercised value."""
@@ -397,7 +400,7 @@ class BaristaMCPOperationTests(unittest.TestCase):
             {"operation": "restart_editor"},
             {"operation": "save_scene", "unknown": 1},
             {"operation": 7},
-            {"operation": "open_scene", "path": MAIN_SCENE, "line": 1},
+            {"operation": "open_scene", "path": MAIN_SCENE, "grab_focus": True},
             {"operation": "edit_script", "path": SAMPLE_SCRIPT, "screen": "Script"},
             {"operation": "save_scene", "grab_focus": True},
             {"operation": "stop_play", "path": MAIN_SCENE},
@@ -410,19 +413,16 @@ class BaristaMCPOperationTests(unittest.TestCase):
                 self.assertIs(payload["ok"], False)
                 self.assertNotIn("operation", payload)
 
-    def test_out_of_range_numbers_are_rejected(self) -> None:
-        for line in (0, -1, 1e300, 2**63, 1000001):
-            with self.subTest(line=line):
+    def test_caret_arguments_are_not_accepted(self) -> None:
+        """A field Barista cannot substantiate is refused, not silently ignored."""
+        for arguments in (
+            {"operation": "edit_script", "path": SAMPLE_SCRIPT, "line": 2},
+            {"operation": "edit_script", "path": SAMPLE_SCRIPT, "column": 0},
+            {"operation": "edit_script", "path": SAMPLE_SCRIPT, "line": 1e300},
+        ):
+            with self.subTest(arguments=arguments):
                 result = self.client.rpc(
-                    "tools/call",
-                    {
-                        "name": OPERATION_TOOL,
-                        "arguments": {
-                            "operation": "edit_script",
-                            "path": SAMPLE_SCRIPT,
-                            "line": line,
-                        },
-                    },
+                    "tools/call", {"name": OPERATION_TOOL, "arguments": arguments}
                 )["result"]
                 self.assertIs(result["isError"], True)
                 self.assertEqual(result["structuredContent"]["status"], "invalid_arguments")
@@ -525,6 +525,10 @@ class BaristaMCPOperationTests(unittest.TestCase):
         reloaded = self.run_operation(operation="reload_scene", path=MAIN_SCENE)
         self.assert_well_formed(reloaded)
         self.assertIn(reloaded["status"], ("ok", "pending"), reloaded)
+        # A successful reload leaves the scene open, not merely absent from the unsaved list.
+        if reloaded["ok"]:
+            self.assertEqual(reloaded["observable"]["observed"], "open, saved", reloaded)
+            self.assertIn(MAIN_SCENE, self.state()["scenes"]["open"]["items"])
 
     def test_select_file_moves_the_filesystem_selection(self) -> None:
         payload = self.run_operation(operation="select_file", path=SAMPLE_SCRIPT)
@@ -538,9 +542,7 @@ class BaristaMCPOperationTests(unittest.TestCase):
             self.assertIs(repeated["changed"], False, repeated)
 
     def test_edit_script_opens_the_script(self) -> None:
-        payload = self.run_operation(
-            operation="edit_script", path=SAMPLE_SCRIPT, line=2, column=0, grab_focus=False
-        )
+        payload = self.run_operation(operation="edit_script", path=SAMPLE_SCRIPT, grab_focus=False)
         self.assert_well_formed(payload)
         self.assertIn(payload["status"], ("ok", "pending", "unsupported_capability"), payload)
         if payload["ok"]:
@@ -669,30 +671,6 @@ class BaristaMCPOperationWithoutASceneTests(unittest.TestCase):
 
 
 class BaristaMCPOperationPortabilityTests(unittest.TestCase):
-    def test_caret_argument_bases_match_the_engine_defaults(self) -> None:
-        """The engine's own published defaults are what fix the base of each caret argument.
-
-        EditorInterface::edit_script declares line's default as the sentinel -1 and column's default
-        as 0. A one-based column could not default to 0, and a zero-based line could not use -1 as a
-        "no line" sentinel, so line is advertised one-based and column zero-based and both are passed
-        through unchanged. If a later Godot changed either base it would have to change these
-        defaults, and this test would catch it rather than the caret quietly landing elsewhere.
-        """
-        api = json.loads(PINNED_EXTENSION_API.read_text(encoding="utf-8"))
-        classes = {entry["name"]: entry for entry in api["classes"]}
-        edit_script = next(
-            method
-            for method in classes["EditorInterface"]["methods"]
-            if method["name"] == "edit_script"
-        )
-        defaults = {
-            argument["name"]: argument.get("default_value")
-            for argument in edit_script["arguments"]
-        }
-        self.assertEqual(defaults["line"], "-1")
-        self.assertEqual(defaults["column"], "0")
-        self.assertEqual(defaults["grab_focus"], "true")
-
     def test_pinned_extension_api_covers_every_operation(self) -> None:
         """Portability evidence: every engine symbol an operation calls exists in the pinned public API."""
         api = json.loads(PINNED_EXTENSION_API.read_text(encoding="utf-8"))

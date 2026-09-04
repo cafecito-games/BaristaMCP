@@ -23,10 +23,6 @@ struct EditorOperationRequest {
 	String operation;
 	bool has_path = false;
 	String path;
-	bool has_line = false;
-	int line = 1;
-	bool has_column = false;
-	int column = 0;
 	bool has_grab_focus = false;
 	bool grab_focus = false;
 };
@@ -87,7 +83,7 @@ public:
 	// The resource type an operation's path must name, empty when any existing file is acceptable.
 	static String operation_path_type(const String &p_operation);
 	static bool operation_uses_path(const String &p_operation);
-	static bool operation_uses_caret(const String &p_operation);
+	static bool operation_uses_focus(const String &p_operation);
 
 	// Parses one operation request. It reads no editor state, so arguments are settled before anything
 	// can be captured or mutated. Returns false with a bounded diagnostic for an unknown operation, a

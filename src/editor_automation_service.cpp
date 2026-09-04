@@ -914,10 +914,17 @@ Dictionary EditorAutomationService::_run_operation(const EditorOperationRequest 
 		}
 		const bool was_unsaved = contains_path(entry_unsaved, p_request.path);
 		editor_interface->reload_scene_from_path(p_request.path);
-		const bool still_unsaved =
+		// A reload that cannot load the replacement leaves the scene neither open nor unsaved, so
+		// "no longer unsaved" on its own would report a closed scene as a successful reload. The scene
+		// must still be open as well.
+		const bool open_after = contains_path(EditorStateReader::open_scene_paths(editor_interface), p_request.path);
+		const bool unsaved_after =
 				contains_path(EditorStateReader::unsaved_scene_paths(editor_interface), p_request.path);
-		return operation_outcome(operation, unsaved_text(false, p_request.path),
-				unsaved_text(still_unsaved, p_request.path), !still_unsaved, was_unsaved && !still_unsaved, nullptr);
+		const bool reloaded = open_after && !unsaved_after;
+		const String observed = (open_after ? String("open") : String("not open")) +
+				(unsaved_after ? String(", unsaved") : String(", saved"));
+		return operation_outcome(
+				operation, "open and saved: " + p_request.path, observed, reloaded, was_unsaved && reloaded, nullptr);
 	}
 
 	if (operation == "play_current_scene" || operation == "play_main_scene" || operation == "play_scene") {
@@ -1001,8 +1008,9 @@ Dictionary EditorAutomationService::_run_operation(const EditorOperationRequest 
 			return EditorStateReader::operation_failure(OperationStatus::OPERATION_FAILED,
 					"'" + bounded_text(p_request.path) + "' could not be loaded as a script.", operation);
 		}
-		editor_interface->edit_script(script, p_request.has_line ? p_request.line : -1,
-				p_request.has_column ? p_request.column : 0, p_request.grab_focus);
+		// The caret arguments keep the engine's own defaults: nothing here positions a caret, because
+		// nothing here could verify where one landed.
+		editor_interface->edit_script(script, -1, 0, p_request.grab_focus);
 		const String current = EditorStateReader::current_script_path(editor_interface);
 		return operation_outcome(
 				operation, p_request.path, current, current == p_request.path, current != entry_script, nullptr);

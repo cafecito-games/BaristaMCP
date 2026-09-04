@@ -25,7 +25,6 @@
 #include <godot_cpp/variant/typed_array.hpp>
 #include <godot_cpp/variant/variant.hpp>
 
-#include <cmath>
 #include <filesystem>
 #include <system_error>
 
@@ -346,7 +345,7 @@ struct OperationRule {
 	// nullptr when the operation takes no path at all; an empty string when any existing res:// file
 	// is acceptable; otherwise the resource type the path must name.
 	const char *path_type;
-	bool uses_caret;
+	bool uses_focus;
 };
 
 const OperationRule OPERATION_RULES[] = {
@@ -355,8 +354,8 @@ const OperationRule OPERATION_RULES[] = {
 		{"save_all_scenes", "scenes.unsaved",
 				"No file-backed scene that was unsaved when the request arrived is still unsaved.", nullptr, false},
 		{"open_scene", "scenes.current", "The requested scene is the edited scene.", "PackedScene", false},
-		{"reload_scene", "scenes.unsaved",
-				"The requested scene is open and carries no unsaved changes after the reload.", "PackedScene", false},
+		{"reload_scene", "scenes", "The requested scene is still open and carries no unsaved changes after the reload.",
+				"PackedScene", false},
 		{"play_current_scene", "play.is_playing", "The editor reports a scene is playing.", nullptr, false},
 		{"play_main_scene", "play.is_playing", "The editor reports a scene is playing.", nullptr, false},
 		{"play_scene", "play.playing_scene", "The editor reports the requested scene is the playing scene.",
@@ -364,10 +363,8 @@ const OperationRule OPERATION_RULES[] = {
 		{"stop_play", "play.is_playing", "The editor reports no scene is playing.", nullptr, false},
 		{"select_file", "filesystem.current_path", "The filesystem dock's current path is the requested file.", "",
 				false},
-		{"edit_script", "script.current",
-				"The requested script is the script editor's current script. The optional line and column are "
-				"caret hints the public API cannot report back, so they are explicitly not part of this claim.",
-				"Script", true},
+		{"edit_script", "script.current", "The requested script is the script editor's current script.", "Script",
+				true},
 };
 
 const OperationRule *find_operation_rule(const String &p_operation) {
@@ -380,7 +377,7 @@ const OperationRule *find_operation_rule(const String &p_operation) {
 }
 
 // Every argument run_editor_action understands. A key outside this list is a rejection, never noise.
-const char *OPERATION_ARGUMENT_NAMES[] = {"operation", "path", "line", "column", "grab_focus"};
+const char *OPERATION_ARGUMENT_NAMES[] = {"operation", "path", "grab_focus"};
 
 bool is_known_argument(const String &p_name) {
 	for (const char *name : OPERATION_ARGUMENT_NAMES) {
@@ -517,9 +514,9 @@ bool EditorStateReader::operation_uses_path(const String &p_operation) {
 	return rule != nullptr && rule->path_type != nullptr;
 }
 
-bool EditorStateReader::operation_uses_caret(const String &p_operation) {
+bool EditorStateReader::operation_uses_focus(const String &p_operation) {
 	const OperationRule *rule = find_operation_rule(p_operation);
-	return rule != nullptr && rule->uses_caret;
+	return rule != nullptr && rule->uses_focus;
 }
 
 bool EditorStateReader::parse_operation(
@@ -560,54 +557,9 @@ bool EditorStateReader::parse_operation(
 		return false;
 	}
 
-	const bool uses_caret = operation_uses_caret(r_request.operation);
-	struct CaretField {
-		const char *name;
-		int minimum;
-		int maximum;
-		bool *has_value;
-		int *value;
-	};
-	const CaretField caret_fields[] = {
-			{"line", EditorOperationLimits::MIN_LINE, EditorOperationLimits::MAX_LINE, &r_request.has_line,
-					&r_request.line},
-			{"column", EditorOperationLimits::MIN_COLUMN, EditorOperationLimits::MAX_COLUMN, &r_request.has_column,
-					&r_request.column},
-	};
-	for (const CaretField &field : caret_fields) {
-		if (!p_arguments.has(field.name)) {
-			continue;
-		}
-		if (!uses_caret) {
-			r_message = "Operation '" + r_request.operation + "' takes no '" + String(field.name) + "'.";
-			return false;
-		}
-		const Variant field_value = p_arguments.get(field.name, Variant());
-		// JSON carries every number as a double, so an integral float is a valid JSON Schema integer.
-		// The value is range-checked as a double before it is narrowed, so a number no fixed-width
-		// integer can hold is rejected rather than converted; NaN and the infinities fail the same
-		// comparison and are refused with everything else out of range.
-		double raw = 0.0;
-		if (field_value.get_type() == Variant::INT) {
-			raw = (double)(int64_t)field_value;
-		} else if (field_value.get_type() == Variant::FLOAT) {
-			raw = (double)field_value;
-		} else {
-			r_message =
-					"Operation '" + r_request.operation + "' requires '" + String(field.name) + "' to be an integer.";
-			return false;
-		}
-		if (!(raw >= (double)field.minimum && raw <= (double)field.maximum) || raw != std::floor(raw)) {
-			r_message = "Operation '" + r_request.operation + "' rejected an out-of-range or non-integral '" +
-					String(field.name) + "'.";
-			return false;
-		}
-		*field.has_value = true;
-		*field.value = (int)raw;
-	}
-
+	const bool uses_focus = operation_uses_focus(r_request.operation);
 	if (p_arguments.has("grab_focus")) {
-		if (!uses_caret) {
+		if (!uses_focus) {
 			r_message = "Operation '" + r_request.operation + "' takes no 'grab_focus'.";
 			return false;
 		}

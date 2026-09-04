@@ -585,19 +585,13 @@ Dictionary operation_input_schema() {
 							  "empty segments, other schemes, absolute paths, percent encoding, and "
 							  "backslashes are refused rather than normalized away."),
 			false);
-	MCPSchema::add_property(schema, "line",
-			MCPSchema::ranged_integer(EditorOperationLimits::MIN_LINE, EditorOperationLimits::MAX_LINE,
-					"One-based caret line for edit_script. The public API cannot report a caret back, so the "
-					"caret is explicitly not part of this operation's verified claim."),
-			false);
-	MCPSchema::add_property(schema, "column",
-			MCPSchema::ranged_integer(EditorOperationLimits::MIN_COLUMN, EditorOperationLimits::MAX_COLUMN,
-					"Zero-based caret column for edit_script."),
-			false);
 	MCPSchema::add_property(schema, "grab_focus",
 			MCPSchema::boolean("Whether edit_script should move editor focus to the script editor. Barista "
 							   "defaults it to false so an operation never steals editor focus unasked, which "
-							   "is a deliberate divergence from the engine method's own default."),
+							   "is a deliberate divergence from the engine method's own default. Caret line "
+							   "and column are deliberately not offered: the public API neither reports a "
+							   "caret back nor documents the base of those arguments, so Barista does not "
+							   "advertise a field whose meaning it cannot substantiate."),
 			false);
 	return schema;
 }
