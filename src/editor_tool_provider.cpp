@@ -194,6 +194,18 @@ Dictionary EditorToolProvider::call(
 		if (!automation_error.is_empty()) {
 			return _tool_error(automation_error, automation_message);
 		}
+	} else if (p_name == "wait_for_editor" || p_name == "poll_barista_events") {
+		if (automation_service == nullptr) {
+			return _tool_error("unsupported_capability", "Editor automation is unavailable in this session.");
+		}
+		String automation_error;
+		String automation_message;
+		structured = p_name == "wait_for_editor"
+				? automation_service->wait_for_editor(p_arguments, automation_error, automation_message)
+				: automation_service->poll_events(p_arguments, automation_error, automation_message);
+		if (!automation_error.is_empty()) {
+			return _tool_error(automation_error, automation_message);
+		}
 	} else if (p_name == "inspect_editor_ui") {
 		if (automation_service == nullptr) {
 			return _tool_error("unsupported_capability", "Editor automation is unavailable in this session.");

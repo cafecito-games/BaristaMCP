@@ -125,8 +125,10 @@ void BaristaMCPPlugin::_enter_tree() {
 
 void BaristaMCPPlugin::_exit_tree() {
 	set_process(false);
-	server.stop();
+	// Every wait handle is cancelled and cleared before the transport releases the dispatcher, so no
+	// wait can outlive the service that owns it and none is left for a later frame to advance.
 	automation_service.shutdown();
+	server.stop();
 }
 
 void BaristaMCPPlugin::_process(double p_delta) {

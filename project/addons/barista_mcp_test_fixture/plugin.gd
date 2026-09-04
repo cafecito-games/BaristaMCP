@@ -19,11 +19,16 @@ const COUNTERS_NAME := "Action Counters"
 ## many parents that each hold a wide child list.
 const WIDE_INTERNAL_CHILDREN_SETTING := "barista_mcp_test_fixture/wide_internal_children"
 const WIDE_INTERNAL_GROUP_SIZE := 250
+## Name of the control that exists only as an internal child of the fixture panel. It is reachable
+## through a capture that includes internal children and through no other capture, so a verdict about
+## its presence or absence is only sound when the verdict was decided over that wider domain.
+const INTERNAL_ONLY_NAME := "Internal Only Field"
 ## Length cap published by the "Ticket" field, so a test can request text the field can never hold.
 const TICKET_MAX_LENGTH := 8
 
 var _panel: PanelContainer = null
 var _counters: Label = null
+var _internal_only: LineEdit = null
 ## Counts the editor signals the signalling actions are expected to raise, published as label text so
 ## an acceptance test observes an action through a fresh snapshot rather than through the tool's own
 ## report of itself. Text actions raise no signal that a control method and an input event share, so
@@ -233,6 +238,13 @@ func _enter_tree() -> void:
 	column.add_child(_counters)
 	_publish_counts()
 
+	## A real control reachable only through a capture that includes internal children. Nothing about
+	## it is hidden from the editor: it is simply outside the default capture domain.
+	_internal_only = LineEdit.new()
+	_internal_only.name = INTERNAL_ONLY_NAME
+	_internal_only.set_accessibility_name(INTERNAL_ONLY_NAME)
+	column.add_child(_internal_only, false, Node.INTERNAL_MODE_BACK)
+
 	_add_wide_internal_subtree()
 
 	base_control.add_child(_panel)
@@ -274,6 +286,7 @@ func _publish_counts() -> void:
 
 
 func _exit_tree() -> void:
+	_internal_only = null
 	if _panel == null:
 		return
 	_counters = null
