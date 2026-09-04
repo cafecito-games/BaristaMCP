@@ -869,6 +869,19 @@ Dictionary EditorAutomationService::_run_operation(const EditorOperationRequest 
 
 	const String operation = p_request.operation;
 
+	if (operation == "save_scene" || operation == "save_all_scenes") {
+		// The editor's own save path stops a running scene before it writes, and that side effect lands
+		// outside the postcondition this route publishes, so a save would report "ok" while silently
+		// terminating the running game. A save is refused while a scene is playing rather than
+		// performed with an effect it cannot report.
+		if (entry_playing) {
+			return EditorStateReader::operation_failure(OperationStatus::CONFLICTING_STATE,
+					"A scene is playing and saving can stop it, which is an effect this operation cannot "
+					"report; stop the running scene first.",
+					operation);
+		}
+	}
+
 	if (operation == "save_scene") {
 		if (entry_scene.is_empty()) {
 			return EditorStateReader::operation_failure(OperationStatus::OPERATION_FAILED,

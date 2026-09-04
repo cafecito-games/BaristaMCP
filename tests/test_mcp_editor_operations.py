@@ -580,6 +580,15 @@ class BaristaMCPOperationTests(unittest.TestCase):
                     if payload["status"] == "conflicting_state":
                         # A second play never blindly repeats a non-idempotent operation.
                         self.assertIs(self.state()["play"]["is_playing"], True, payload)
+            # Saving while a scene is playing is refused rather than performed with a side effect on
+            # the running scene that the save postcondition could not report.
+            if self.state()["play"]["is_playing"]:
+                for operation in ("save_scene", "save_all_scenes"):
+                    with self.subTest(operation=operation):
+                        refused = self.run_operation(operation=operation)
+                        self.assert_well_formed(refused)
+                        self.assertEqual(refused["status"], "conflicting_state", refused)
+                        self.assertIs(self.state()["play"]["is_playing"], True, refused)
         finally:
             self.run_operation(operation="stop_play")
             self.wait_until_stopped()
