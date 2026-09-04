@@ -23,8 +23,6 @@ struct EditorOperationRequest {
 	String operation;
 	bool has_path = false;
 	String path;
-	bool has_screen = false;
-	String screen;
 	bool has_line = false;
 	int line = 1;
 	bool has_column = false;
@@ -89,7 +87,6 @@ public:
 	// The resource type an operation's path must name, empty when any existing file is acceptable.
 	static String operation_path_type(const String &p_operation);
 	static bool operation_uses_path(const String &p_operation);
-	static bool operation_uses_screen(const String &p_operation);
 	static bool operation_uses_caret(const String &p_operation);
 
 	// Parses one operation request. It reads no editor state, so arguments are settled before anything
@@ -109,10 +106,6 @@ public:
 	static PackedStringArray unsaved_scene_paths(EditorInterface *p_editor_interface);
 	static String current_filesystem_path(EditorInterface *p_editor_interface);
 	static String current_script_path(EditorInterface *p_editor_interface);
-	static String current_main_screen(EditorInterface *p_editor_interface);
-	// The main screens this editor build actually shows. A screen that is not here cannot be switched
-	// to, so it is rejected rather than requested.
-	static PackedStringArray main_screen_names(EditorInterface *p_editor_interface);
 
 	// The run_editor_action payload for a request that performed nothing. Every failure a client can
 	// provoke is published in this one shape.

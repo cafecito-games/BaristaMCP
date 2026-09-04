@@ -849,8 +849,6 @@ Dictionary EditorAutomationService::_run_operation(const EditorOperationRequest 
 	const String entry_playing_scene = editor_interface->get_playing_scene();
 	const String entry_filesystem_path = EditorStateReader::current_filesystem_path(editor_interface);
 	const String entry_script = EditorStateReader::current_script_path(editor_interface);
-	const String entry_screen = EditorStateReader::current_main_screen(editor_interface);
-	const PackedStringArray screens = EditorStateReader::main_screen_names(editor_interface);
 
 	// One validator, run by every operation that takes a path, before any EditorInterface call. A
 	// rejection here has touched nothing.
@@ -973,24 +971,6 @@ Dictionary EditorAutomationService::_run_operation(const EditorOperationRequest 
 		const String current = EditorStateReader::current_filesystem_path(editor_interface);
 		return operation_outcome(operation, p_request.path, current, current == p_request.path,
 				current != entry_filesystem_path, nullptr);
-	}
-
-	if (operation == "switch_main_screen") {
-		if (screens.is_empty()) {
-			return EditorStateReader::operation_failure(OperationStatus::UNSUPPORTED_CAPABILITY,
-					"This editor build shows no main screens, so none can be switched to.", operation);
-		}
-		if (!screens.has(p_request.screen)) {
-			return EditorStateReader::operation_failure(OperationStatus::INVALID_ARGUMENTS,
-					"'" + bounded_text(p_request.screen) +
-							"' is not one of the main screens this editor shows; read "
-							"'main_screen.available' from read_editor_state.",
-					operation);
-		}
-		editor_interface->set_main_screen_editor(p_request.screen);
-		const String current = EditorStateReader::current_main_screen(editor_interface);
-		return operation_outcome(
-				operation, p_request.screen, current, current == p_request.screen, current != entry_screen, nullptr);
 	}
 
 	if (operation == "edit_script") {

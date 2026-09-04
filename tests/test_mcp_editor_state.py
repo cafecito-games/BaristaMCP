@@ -19,7 +19,7 @@ from mcp_test_support import ROOT, EditorProcess, MCPClient  # noqa: E402
 PINNED_EXTENSION_API = ROOT / "godot-cpp" / "gdextension" / "extension_api-4-7.json"
 BUILD_PROFILE = ROOT / "build_profile.json"
 
-STATE_SECTIONS = ("project", "scenes", "selection", "script", "filesystem", "play", "main_screen")
+STATE_SECTIONS = ("project", "scenes", "selection", "script", "filesystem", "play")
 STRING_LIST_FIELDS = ("count", "items", "truncated")
 
 
@@ -91,14 +91,6 @@ class BaristaMCPEditorStateTests(unittest.TestCase):
         play = state["play"]
         self.assertIs(play["is_playing"], False)
         self.assertIsInstance(play["playing_scene"], str)
-
-        main_screen = state["main_screen"]
-        self.assertIsInstance(main_screen["current"], str)
-        self._assert_string_list(main_screen["available"])
-        # A screen the editor does not show can never be switched to, so it is never advertised as
-        # available; whatever is current must be one of the names published here.
-        if main_screen["current"]:
-            self.assertIn(main_screen["current"], main_screen["available"]["items"])
 
     def test_tool_and_resource_state_cannot_drift(self) -> None:
         """Single source of truth: the resource and the tool call the same reader."""
@@ -176,7 +168,6 @@ class BaristaMCPEditorStatePortabilityTests(unittest.TestCase):
         required_methods = {
             "EditorInterface": (
                 "get_current_path",
-                "get_editor_main_screen",
                 "get_open_scenes",
                 "get_playing_scene",
                 "get_resource_filesystem",

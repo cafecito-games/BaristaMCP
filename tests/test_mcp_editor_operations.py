@@ -39,7 +39,6 @@ OPERATIONS = (
     "play_scene",
     "stop_play",
     "select_file",
-    "switch_main_screen",
     "edit_script",
 )
 # One definition of the operation status vocabulary, mirrored from
@@ -75,7 +74,6 @@ OPERATION_OBSERVABLE_FIELDS = {
     "play_scene": "play.playing_scene",
     "stop_play": "play.is_playing",
     "select_file": "filesystem.current_path",
-    "switch_main_screen": "main_screen.current",
     "edit_script": "script.current",
 }
 
@@ -90,9 +88,9 @@ STATUS_COVERAGE = {
     "invalid_resource_type": "test_edit_script_rejects_a_resource_of_the_wrong_type",
     "conflicting_state": "test_reload_scene_requires_the_scene_to_be_open",
     "operation_failed": "BaristaMCPOperationWithoutASceneTests.test_scene_operations_fail_closed",
-    # No stock Godot 4.7 editor omits the script editor or every main screen, so this fail-closed
-    # branch has no reachable trigger from a client. It is covered by the advertised vocabulary and by
-    # the refusal it produces being the same shape as every other one.
+    # No stock Godot 4.7 editor omits the script editor, so this fail-closed branch has no reachable
+    # trigger from a client. It is covered by the advertised vocabulary and by the refusal it produces
+    # being the same shape as every other one.
     "unsupported_capability": "advertised vocabulary only; unreachable in a stock editor",
     "mutation_already_handled": "test_one_request_spends_one_mutation",
 }
@@ -101,6 +99,10 @@ MAIN_SCENE = "res://main.tscn"
 OTHER_SCENE = "res://scenes/other.tscn"
 SAMPLE_SCRIPT = "res://sample.gd"
 PLAIN_FILE = "res://notes.txt"
+# A file and a directory inside the project that resolve to a location outside it. Both exist and
+# both normalize cleanly, so only resolving them can tell that they leave the project.
+LINKED_SCENE = "res://linked.tscn"
+LINKED_DIRECTORY_SCENE = "res://linked/outside.tscn"
 
 SCENE_TEXT = """[gd_scene format=3]
 
@@ -138,14 +140,22 @@ REJECTED_PATHS = (
     ("res://main\\other.tscn", "invalid_resource_path", "backslash separator"),
     ("res://" + "a" * 600 + ".tscn", "invalid_resource_path", "over-long path"),
     ("res://missing.tscn", "invalid_resource_path", "non-existent resource"),
+    (LINKED_SCENE, "invalid_resource_path", "a symlinked file resolving outside the project"),
+    (LINKED_DIRECTORY_SCENE, "invalid_resource_path", "a path through a symlinked directory"),
     (SAMPLE_SCRIPT, "invalid_resource_type", "a script where a scene is required"),
     (PLAIN_FILE, "invalid_resource_type", "a non-scene file where a scene is required"),
 )
 
 
-def write_operations_project(project_dir: Path) -> None:
+def write_operations_project(project_dir: Path, outside_dir: Path | None = None) -> None:
     """A temporary project with its own scenes, script, and plain file. Nothing here is shared."""
     (project_dir / "scenes").mkdir()
+    if outside_dir is not None:
+        # A scene that really exists, outside the project, reachable through two res:// paths that are
+        # perfectly normalized. Only resolving the path can tell that it leaves the project.
+        (outside_dir / "outside.tscn").write_text(SCENE_TEXT.format(root="Outside"), encoding="utf-8")
+        (project_dir / "linked.tscn").symlink_to(outside_dir / "outside.tscn")
+        (project_dir / "linked").symlink_to(outside_dir, target_is_directory=True)
     (project_dir / "main.tscn").write_text(SCENE_TEXT.format(root="Main"), encoding="utf-8")
     (project_dir / "scenes" / "other.tscn").write_text(
         SCENE_TEXT.format(root="Other"), encoding="utf-8"
@@ -220,23 +230,26 @@ class BaristaMCPOperationGateTests(unittest.TestCase):
                 OPERATION_TOOL, {"operation": operation, "path": MAIN_SCENE}
             )
         after = self.client.structured_tool("read_editor_state", {})
-        for section in ("scenes", "script", "play", "main_screen"):
+        for section in ("scenes", "script", "play"):
             with self.subTest(section=section):
                 self.assertEqual(before[section], after[section])
+        self.assertEqual(before["filesystem"]["current_path"], after["filesystem"]["current_path"])
 
 
 class BaristaMCPOperationTests(unittest.TestCase):
     """An opted-in session performs every operation through a documented public EditorInterface call."""
 
     temporary: tempfile.TemporaryDirectory[str]
+    outside: tempfile.TemporaryDirectory[str]
     editor: EditorProcess
     client: MCPClient
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.temporary = tempfile.TemporaryDirectory(prefix="barista-mcp-operations-")
+        cls.outside = tempfile.TemporaryDirectory(prefix="barista-mcp-outside-")
         project_dir = Path(cls.temporary.name)
-        write_operations_project(project_dir)
+        write_operations_project(project_dir, Path(cls.outside.name))
         cls.editor = EditorProcess(project_dir, extra_args=("--", AUTOMATION_ARGUMENT))
         try:
             cls.editor.start()
@@ -245,6 +258,7 @@ class BaristaMCPOperationTests(unittest.TestCase):
         except BaseException:
             cls.editor.stop()
             cls.temporary.cleanup()
+            cls.outside.cleanup()
             raise
 
     @classmethod
@@ -253,6 +267,7 @@ class BaristaMCPOperationTests(unittest.TestCase):
             cls.editor.stop()
         finally:
             cls.temporary.cleanup()
+            cls.outside.cleanup()
 
     def run_operation(self, **arguments: Any) -> dict[str, Any]:
         return self.client.structured_tool(OPERATION_TOOL, arguments)
@@ -349,10 +364,14 @@ class BaristaMCPOperationTests(unittest.TestCase):
         Saving rewrites the scene through Godot's own writer, so what is on disk afterwards is a real
         producer's output. Every loader the operations run must accept exactly those bytes.
         """
-        self.run_operation(operation="open_scene", path=OTHER_SCENE)
-        self.wait_for_scene(OTHER_SCENE)
+        opened = self.run_operation(operation="open_scene", path=OTHER_SCENE)
+        self.assert_well_formed(opened)
+        # save_scene saves whatever is being edited, so the scene must really be current before the
+        # bytes on disk can be attributed to this test at all.
+        self.assertEqual(self.wait_for_scene(OTHER_SCENE), OTHER_SCENE)
         saved = self.run_operation(operation="save_scene")
         self.assert_well_formed(saved)
+        self.assertEqual(saved["status"], "ok", saved)
         on_disk = (Path(self.temporary.name) / "scenes" / "other.tscn").read_bytes()
         # Godot's own scene writer stamps a resource uid, which the hand-written fixture never had.
         self.assertIn(b"uid://", on_disk, on_disk[:200])
@@ -370,9 +389,9 @@ class BaristaMCPOperationTests(unittest.TestCase):
             {"operation": 7},
             {"operation": "open_scene", "path": MAIN_SCENE, "line": 1},
             {"operation": "edit_script", "path": SAMPLE_SCRIPT, "screen": "Script"},
+            {"operation": "save_scene", "grab_focus": True},
             {"operation": "stop_play", "path": MAIN_SCENE},
             {"operation": "save_all_scenes", "path": MAIN_SCENE},
-            {"operation": "switch_main_screen"},
             {"operation": "open_scene"},
         ):
             with self.subTest(arguments=arguments):
@@ -410,9 +429,24 @@ class BaristaMCPOperationTests(unittest.TestCase):
                     self.assertEqual(payload["status"], status, payload)
                     self.assertIs(payload["changed"], False)
         after = self.state()
-        for section in ("scenes", "script", "play", "main_screen"):
+        for section in ("scenes", "script", "play"):
             with self.subTest(section=section):
                 self.assertEqual(before[section], after[section])
+        # The filesystem section also carries a scan progress that moves on its own, so only the field
+        # an operation could have moved is compared.
+        self.assertEqual(before["filesystem"]["current_path"], after["filesystem"]["current_path"])
+
+    def test_a_symlink_out_of_the_project_is_refused_for_leaving_it(self) -> None:
+        """The escape is refused for resolving outside, not for looking absent.
+
+        Both paths name a file that really exists and normalizes cleanly, so a rejection that merely
+        said the file was missing would mean the boundary check never ran.
+        """
+        for path in (LINKED_SCENE, LINKED_DIRECTORY_SCENE):
+            with self.subTest(path=path):
+                payload = self.run_operation(operation="open_scene", path=path)
+                self.assertEqual(payload["status"], "invalid_resource_path", payload)
+                self.assertIn("resolves outside the project directory", payload["message"])
 
     def test_edit_script_rejects_a_resource_of_the_wrong_type(self) -> None:
         for path in (MAIN_SCENE, PLAIN_FILE):
@@ -501,27 +535,6 @@ class BaristaMCPOperationTests(unittest.TestCase):
         self.assertIn(payload["status"], ("ok", "pending", "unsupported_capability"), payload)
         if payload["ok"]:
             self.assertEqual(self.state()["script"]["current"], SAMPLE_SCRIPT)
-
-    def test_switch_main_screen_verifies_the_visible_screen(self) -> None:
-        available = self.state()["main_screen"]["available"]["items"]
-        if len(available) < 2:
-            self.skipTest("This editor build advertises fewer than two main screens.")
-        current = self.state()["main_screen"]["current"]
-        target = next(name for name in available if name != current)
-        payload = self.run_operation(operation="switch_main_screen", screen=target)
-        self.assert_well_formed(payload)
-        self.assertIn(payload["status"], ("ok", "pending"), payload)
-        if payload["ok"]:
-            self.assertEqual(self.state()["main_screen"]["current"], target)
-            repeated = self.run_operation(operation="switch_main_screen", screen=target)
-            self.assertEqual(repeated["status"], "ok", repeated)
-            self.assertIs(repeated["changed"], False, repeated)
-
-    def test_unknown_main_screen_is_rejected(self) -> None:
-        for screen in ("", "   ", "Nope", "2D\u0000", "a" * 200):
-            with self.subTest(screen=screen):
-                payload = self.run_operation(operation="switch_main_screen", screen=screen)
-                self.assertEqual(payload["status"], "invalid_arguments", payload)
 
     def test_stop_play_is_idempotent_when_nothing_is_playing(self) -> None:
         payload = self.run_operation(operation="stop_play")
@@ -658,7 +671,6 @@ class BaristaMCPOperationPortabilityTests(unittest.TestCase):
             "EditorInterface": (
                 "edit_script",
                 "get_current_path",
-                "get_editor_main_screen",
                 "get_open_scenes",
                 "get_playing_scene",
                 "get_unsaved_scenes",
@@ -671,7 +683,6 @@ class BaristaMCPOperationPortabilityTests(unittest.TestCase):
                 "save_all_scenes",
                 "save_scene",
                 "select_file",
-                "set_main_screen_editor",
                 "stop_playing_scene",
             ),
             "ResourceLoader": ("exists", "get_recognized_extensions_for_type", "load"),

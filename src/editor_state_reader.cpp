@@ -11,7 +11,6 @@
 #include "editor_automation_types.h"
 #include "mcp_contracts.h"
 
-#include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/editor_file_system.hpp>
 #include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/editor_selection.hpp>
@@ -22,12 +21,13 @@
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/script.hpp>
 #include <godot_cpp/classes/script_editor.hpp>
-#include <godot_cpp/classes/v_box_container.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
 #include <godot_cpp/variant/variant.hpp>
 
 #include <cmath>
+#include <filesystem>
+#include <system_error>
 
 namespace godot {
 
@@ -254,13 +254,6 @@ Dictionary play_section(EditorInterface *p_editor_interface) {
 	return play;
 }
 
-Dictionary main_screen_section(EditorInterface *p_editor_interface) {
-	Dictionary main_screen;
-	main_screen["current"] = EditorStateReader::current_main_screen(p_editor_interface);
-	main_screen["available"] = bounded_string_list(EditorStateReader::main_screen_names(p_editor_interface));
-	return main_screen;
-}
-
 } // namespace
 
 Dictionary EditorStateReader::project_info(EditorInterface *p_editor_interface) {
@@ -292,7 +285,6 @@ Dictionary EditorStateReader::editor_state(EditorInterface *p_editor_interface) 
 	state["script"] = script_section(p_editor_interface);
 	state["filesystem"] = filesystem_section(p_editor_interface);
 	state["play"] = play_section(p_editor_interface);
-	state["main_screen"] = main_screen_section(p_editor_interface);
 	return state;
 }
 
@@ -354,33 +346,28 @@ struct OperationRule {
 	// nullptr when the operation takes no path at all; an empty string when any existing res:// file
 	// is acceptable; otherwise the resource type the path must name.
 	const char *path_type;
-	bool uses_screen;
 	bool uses_caret;
 };
 
 const OperationRule OPERATION_RULES[] = {
 		{"save_scene", "scenes.unsaved",
-				"The edited scene's own file is no longer listed as unsaved after the request.", nullptr, false, false},
+				"The edited scene's own file is no longer listed as unsaved after the request.", nullptr, false},
 		{"save_all_scenes", "scenes.unsaved",
-				"No file-backed scene that was unsaved when the request arrived is still unsaved.", nullptr, false,
-				false},
-		{"open_scene", "scenes.current", "The requested scene is the edited scene.", "PackedScene", false, false},
+				"No file-backed scene that was unsaved when the request arrived is still unsaved.", nullptr, false},
+		{"open_scene", "scenes.current", "The requested scene is the edited scene.", "PackedScene", false},
 		{"reload_scene", "scenes.unsaved",
-				"The requested scene is open and carries no unsaved changes after the reload.", "PackedScene", false,
-				false},
-		{"play_current_scene", "play.is_playing", "The editor reports a scene is playing.", nullptr, false, false},
-		{"play_main_scene", "play.is_playing", "The editor reports a scene is playing.", nullptr, false, false},
+				"The requested scene is open and carries no unsaved changes after the reload.", "PackedScene", false},
+		{"play_current_scene", "play.is_playing", "The editor reports a scene is playing.", nullptr, false},
+		{"play_main_scene", "play.is_playing", "The editor reports a scene is playing.", nullptr, false},
 		{"play_scene", "play.playing_scene", "The editor reports the requested scene is the playing scene.",
-				"PackedScene", false, false},
-		{"stop_play", "play.is_playing", "The editor reports no scene is playing.", nullptr, false, false},
+				"PackedScene", false},
+		{"stop_play", "play.is_playing", "The editor reports no scene is playing.", nullptr, false},
 		{"select_file", "filesystem.current_path", "The filesystem dock's current path is the requested file.", "",
-				false, false},
-		{"switch_main_screen", "main_screen.current", "The requested main screen is the visible one.", nullptr, true,
 				false},
 		{"edit_script", "script.current",
 				"The requested script is the script editor's current script. The optional line and column are "
 				"caret hints the public API cannot report back, so they are explicitly not part of this claim.",
-				"Script", false, true},
+				"Script", true},
 };
 
 const OperationRule *find_operation_rule(const String &p_operation) {
@@ -393,7 +380,7 @@ const OperationRule *find_operation_rule(const String &p_operation) {
 }
 
 // Every argument run_editor_action understands. A key outside this list is a rejection, never noise.
-const char *OPERATION_ARGUMENT_NAMES[] = {"operation", "path", "screen", "line", "column", "grab_focus"};
+const char *OPERATION_ARGUMENT_NAMES[] = {"operation", "path", "line", "column", "grab_focus"};
 
 bool is_known_argument(const String &p_name) {
 	for (const char *name : OPERATION_ARGUMENT_NAMES) {
@@ -402,6 +389,37 @@ bool is_known_argument(const String &p_name) {
 		}
 	}
 	return false;
+}
+
+// True only when p_path resolves to a real location under the resolved project root. Both sides are
+// canonicalized, so a symlink anywhere along the path is followed before the comparison and cannot
+// smuggle a target out of the project. A resolution that fails is not inside.
+bool is_inside_project(const String &p_path) {
+	ProjectSettings *project_settings = ProjectSettings::get_singleton();
+	if (project_settings == nullptr) {
+		return false;
+	}
+	const CharString root_utf8 = project_settings->globalize_path("res://").trim_suffix("/").utf8();
+	const CharString file_utf8 = project_settings->globalize_path(p_path).utf8();
+	std::error_code root_error;
+	std::error_code file_error;
+	const std::filesystem::path root =
+			std::filesystem::weakly_canonical(std::filesystem::path(root_utf8.get_data()), root_error);
+	const std::filesystem::path file =
+			std::filesystem::weakly_canonical(std::filesystem::path(file_utf8.get_data()), file_error);
+	if (root_error || file_error || root.empty()) {
+		return false;
+	}
+	std::filesystem::path::const_iterator root_part = root.begin();
+	std::filesystem::path::const_iterator file_part = file.begin();
+	for (; root_part != root.end(); ++root_part, ++file_part) {
+		if (file_part == file.end() || *file_part != *root_part) {
+			return false;
+		}
+	}
+	// The project root itself is a directory, never an operable file, so a path equal to it is outside
+	// the set of files an operation may name.
+	return file_part != file.end();
 }
 
 // Characters that can never appear in a path Barista will hand to the editor. Percent and backslash
@@ -499,11 +517,6 @@ bool EditorStateReader::operation_uses_path(const String &p_operation) {
 	return rule != nullptr && rule->path_type != nullptr;
 }
 
-bool EditorStateReader::operation_uses_screen(const String &p_operation) {
-	const OperationRule *rule = find_operation_rule(p_operation);
-	return rule != nullptr && rule->uses_screen;
-}
-
 bool EditorStateReader::operation_uses_caret(const String &p_operation) {
 	const OperationRule *rule = find_operation_rule(p_operation);
 	return rule != nullptr && rule->uses_caret;
@@ -544,24 +557,6 @@ bool EditorStateReader::parse_operation(
 		r_request.path = String(path_value);
 	} else if (uses_path) {
 		r_message = "Operation '" + r_request.operation + "' requires a 'path'.";
-		return false;
-	}
-
-	const bool uses_screen = operation_uses_screen(r_request.operation);
-	if (p_arguments.has("screen")) {
-		const Variant screen_value = p_arguments.get("screen", Variant());
-		if (!uses_screen) {
-			r_message = "Operation '" + r_request.operation + "' takes no 'screen'.";
-			return false;
-		}
-		if (screen_value.get_type() != Variant::STRING) {
-			r_message = "Operation '" + r_request.operation + "' requires 'screen' to be a string.";
-			return false;
-		}
-		r_request.has_screen = true;
-		r_request.screen = String(screen_value);
-	} else if (uses_screen) {
-		r_message = "Operation '" + r_request.operation + "' requires a 'screen'.";
 		return false;
 	}
 
@@ -673,6 +668,13 @@ EditorStateReader::PathStatus EditorStateReader::check_resource_path(
 		r_message = "No file exists at '" + p_path + "'.";
 		return PathStatus::INVALID_PATH;
 	}
+	// Lexical normalization alone would still let a symlink inside the project point outside it, so the
+	// resolved location is required to stay under the resolved project root. Anything that cannot be
+	// resolved is refused rather than assumed to be inside.
+	if (!is_inside_project(p_path)) {
+		r_message = "'" + p_path + "' resolves outside the project directory.";
+		return PathStatus::INVALID_PATH;
+	}
 	if (!p_type.is_empty()) {
 		ResourceLoader *loader = ResourceLoader::get_singleton();
 		// ResourceLoader::exists only asks whether some loader recognizes the path, so on its own it
@@ -725,39 +727,6 @@ String EditorStateReader::current_script_path(EditorInterface *p_editor_interfac
 	}
 	const Ref<Script> current = script_editor->get_current_script();
 	return current.is_valid() ? current->get_path() : String();
-}
-
-String EditorStateReader::current_main_screen(EditorInterface *p_editor_interface) {
-	VBoxContainer *main_screen = p_editor_interface == nullptr ? nullptr : p_editor_interface->get_editor_main_screen();
-	if (main_screen == nullptr) {
-		return String();
-	}
-	const int64_t children = main_screen->get_child_count(false);
-	const int64_t scanned = children < EditorSceneLimits::MAX_LIST_ITEMS ? children : EditorSceneLimits::MAX_LIST_ITEMS;
-	for (int64_t i = 0; i < scanned; i++) {
-		Control *child = Object::cast_to<Control>(main_screen->get_child(i, false));
-		if (child != nullptr && child->is_visible()) {
-			return bounded(child->get_name(), EditorSnapshotLimits::MAX_STRING_LENGTH);
-		}
-	}
-	return String();
-}
-
-PackedStringArray EditorStateReader::main_screen_names(EditorInterface *p_editor_interface) {
-	PackedStringArray names;
-	VBoxContainer *main_screen = p_editor_interface == nullptr ? nullptr : p_editor_interface->get_editor_main_screen();
-	if (main_screen == nullptr) {
-		return names;
-	}
-	const int64_t children = main_screen->get_child_count(false);
-	const int64_t scanned = children < EditorSceneLimits::MAX_LIST_ITEMS ? children : EditorSceneLimits::MAX_LIST_ITEMS;
-	for (int64_t i = 0; i < scanned; i++) {
-		Control *child = Object::cast_to<Control>(main_screen->get_child(i, false));
-		if (child != nullptr) {
-			names.push_back(bounded(child->get_name(), EditorSnapshotLimits::MAX_STRING_LENGTH));
-		}
-	}
-	return names;
 }
 
 Dictionary EditorStateReader::operation_failure(
