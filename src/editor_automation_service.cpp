@@ -18,6 +18,7 @@
 #include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/editor_settings.hpp>
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/script.hpp>
 #include <godot_cpp/classes/script_editor.hpp>
@@ -961,6 +962,32 @@ Dictionary EditorAutomationService::_run_operation(const EditorOperationRequest 
 					"The editor is already playing '" + bounded_text(entry_playing_scene) +
 							"'; stop it before starting another scene.",
 					operation);
+		}
+		// The editor may save dirty scenes before it runs, which writes editor changes this route's
+		// postcondition says nothing about, so a play is refused while anything is unsaved rather than
+		// performed with an effect it cannot report.
+		if (!entry_unsaved.is_empty() || EditorStateReader::has_unsaved_untitled_scene(editor_interface)) {
+			return EditorStateReader::operation_failure(OperationStatus::CONFLICTING_STATE,
+					"An open scene has unsaved changes and the editor may write it to disk before running, "
+					"which is an effect this operation cannot report; save it first.",
+					operation);
+		}
+		if (operation == "play_main_scene") {
+			// With no loadable main scene the editor answers by asking the user to pick one, and no
+			// launch happens at all, so the request would sit pending on a condition nothing will make
+			// true. The configured setting is validated by the same path validator every other
+			// operation uses, before the editor is called.
+			ProjectSettings *project_settings = ProjectSettings::get_singleton();
+			const String main_scene = project_settings == nullptr
+					? String()
+					: String(project_settings->get_setting("application/run/main_scene", ""));
+			String main_scene_message;
+			if (main_scene.is_empty() ||
+					EditorStateReader::check_resource_path(main_scene, "PackedScene", main_scene_message) !=
+							PathStatus::OK) {
+				return EditorStateReader::operation_failure(OperationStatus::OPERATION_FAILED,
+						"This project has no main scene that can be loaded, so there is nothing to play.", operation);
+			}
 		}
 		if (operation == "play_scene") {
 			editor_interface->play_custom_scene(p_request.path);

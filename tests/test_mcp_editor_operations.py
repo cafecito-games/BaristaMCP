@@ -665,7 +665,9 @@ class BaristaMCPOperationWithoutASceneTests(unittest.TestCase):
 
     def test_scene_operations_fail_closed(self) -> None:
         self.assertEqual(self.client.structured_tool("read_editor_state", {})["scenes"]["current"], "")
-        for operation in ("save_scene", "play_current_scene"):
+        # This project also configures no main scene, so play_main_scene has nothing to launch and
+        # refuses rather than leaving the editor asking the user to pick one.
+        for operation in ("save_scene", "play_current_scene", "play_main_scene"):
             with self.subTest(operation=operation):
                 payload = self.client.structured_tool(OPERATION_TOOL, {"operation": operation})
                 self.assertEqual(payload["status"], "operation_failed", payload)
