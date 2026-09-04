@@ -55,6 +55,18 @@ public:
 	// it acts whether it must observe the editor afterwards.
 	static Array build_action_claims();
 
+	// Name of the explicit editor-operation tool. Like the UI action tool it is mutating, advertised
+	// only when mutation was enabled before startup, and answers in its own advertised shape even
+	// where it is not advertised.
+	static constexpr const char *OPERATION_TOOL_NAME = "run_editor_action";
+
+	// The claim one advertised editor operation declares, or an empty string when the operation is not
+	// advertised. The operation vocabulary itself is owned by EditorStateReader and derived here.
+	static String operation_claim(const String &p_operation);
+	// One entry per advertised operation, publishing that route's claim, the read_editor_state field
+	// its postcondition is verified against, and what "ok" was verified to mean.
+	static Array build_operation_claims();
+
 	// Name of the only mutating tool. It is advertised solely when mutation was enabled before startup,
 	// and it is the one tool whose absence must still be answered with a stable status.
 	static constexpr const char *ACT_TOOL_NAME = "act_on_editor_ui";

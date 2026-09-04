@@ -12,6 +12,7 @@
 #include "editor_action_driver.h"
 #include "editor_automation_types.h"
 #include "editor_event_log.h"
+#include "editor_state_reader.h"
 #include "editor_wait_manager.h"
 
 #include <godot_cpp/variant/dictionary.hpp>
@@ -73,6 +74,9 @@ class EditorAutomationService {
 	bool _resolve_target(const Dictionary &p_arguments, const EditorActionRequest &p_request,
 			EditorSnapshotData &r_data, const EditorElement **r_element, Dictionary &r_failure, String &r_error,
 			String &r_message);
+	// The run_editor_action body. It reads every entry-time observable before any branch that can
+	// mutate, so no request is ever validated against state that same request created.
+	Dictionary _run_operation(const EditorOperationRequest &p_request);
 	// The act_on_editor_ui body. It appends one bounded trace entry per decision it makes, so a
 	// failure can publish how far the request got without the caller reconstructing it.
 	Dictionary _act_ui(const Dictionary &p_arguments, std::vector<String> &r_trace, String &r_error, String &r_message);
@@ -95,6 +99,11 @@ public:
 	// Returns the structured act_on_editor_ui payload. Every client-provokable failure is reported
 	// inside the payload as an action status; r_error is set only when the editor cannot be inspected.
 	Dictionary act_ui(const Dictionary &p_arguments, String &r_error, String &r_message);
+	// Returns the structured run_editor_action payload: one explicit editor operation, performed
+	// through the documented EditorInterface method that corresponds to it. Every client-provokable
+	// failure is reported inside the payload as an operation status; r_error is set only when the
+	// editor cannot be reached at all.
+	Dictionary run_operation(const Dictionary &p_arguments, String &r_error, String &r_message);
 	// Returns the structured wait_for_editor payload: start, poll, or cancel one bounded cooperative
 	// wait. Every client-provokable failure is reported inside the payload as a wait status.
 	Dictionary wait_for_editor(const Dictionary &p_arguments, String &r_error, String &r_message);
