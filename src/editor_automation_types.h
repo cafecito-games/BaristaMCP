@@ -110,6 +110,17 @@ struct EditorSceneLimits {
 	static constexpr int MAX_LIST_ITEMS = 64;
 };
 
+// Bounds every explicit editor operation. Both numeric boundary fields advertise an explicit range,
+// so a JSON number that no fixed-width integer can hold is rejected rather than converted.
+struct EditorOperationLimits {
+	static constexpr int MIN_LINE = 1;
+	static constexpr int MAX_LINE = 1000000;
+	static constexpr int MIN_COLUMN = 0;
+	static constexpr int MAX_COLUMN = 100000;
+	// Longest accepted main-screen name. A longer name cannot name a main screen the editor shows.
+	static constexpr int MAX_SCREEN_NAME_LENGTH = 64;
+};
+
 // One page of selector matches. Cursor identity carries the snapshot generation, the snapshot options,
 // and the selector itself, so a page can never be resumed against a different capture or query.
 struct EditorSelectorCursor {

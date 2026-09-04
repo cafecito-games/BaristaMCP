@@ -17,6 +17,9 @@
 #include <godot_cpp/classes/editor_file_system.hpp>
 #include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/resource_loader.hpp>
+#include <godot_cpp/classes/script.hpp>
+#include <godot_cpp/classes/script_editor.hpp>
 #include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
@@ -736,6 +739,283 @@ Dictionary EditorAutomationService::_act_ui(
 	payload["generation"] = (int64_t)after.generation;
 	payload["handle"] = handle;
 	return payload;
+}
+
+namespace {
+
+using OperationStatus = EditorStateReader::OperationStatus;
+using PathStatus = EditorStateReader::PathStatus;
+
+// Bounds every string an operation result publishes, so no client-supplied path can inflate a
+// payload beyond the published transport budget.
+String bounded_text(const String &p_value) {
+	const int limit = EditorSnapshotLimits::MAX_PATH_LENGTH;
+	return p_value.length() <= limit ? p_value : p_value.substr(0, limit);
+}
+
+String bool_text(bool p_value) {
+	return p_value ? "true" : "false";
+}
+
+bool contains_path(const PackedStringArray &p_values, const String &p_path) {
+	for (int i = 0; i < p_values.size(); i++) {
+		if (p_values[i] == p_path) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// A wait_for_editor condition that observes the same predicate, for the operations whose predicate
+// one can express. Where none can, the client polls read_editor_state instead and nothing is
+// published rather than a condition that would observe something else.
+Dictionary play_state_condition(bool p_playing) {
+	Dictionary condition;
+	condition["type"] = EditorWaitManager::CONDITION_PLAY_STATE;
+	condition["playing"] = p_playing;
+	return condition;
+}
+
+// The one shape every performed operation answers in. "ok" is reported only where the published
+// postcondition was read back and held; everything else is an observable pending state.
+Dictionary operation_outcome(const String &p_operation, const String &p_expected, const String &p_observed,
+		bool p_satisfied, bool p_changed, const Dictionary *p_wait_condition) {
+	Dictionary observable;
+	observable["field"] = EditorStateReader::operation_observable_field(p_operation);
+	observable["expected"] = bounded_text(p_expected);
+	observable["observed"] = bounded_text(p_observed);
+	observable["satisfied"] = p_satisfied;
+	if (p_wait_condition != nullptr) {
+		observable["wait_condition"] = *p_wait_condition;
+	}
+
+	Dictionary payload;
+	payload["ok"] = p_satisfied;
+	payload["status"] =
+			EditorStateReader::operation_status_name(p_satisfied ? OperationStatus::OK : OperationStatus::PENDING);
+	payload["message"] = p_satisfied
+			? String()
+			: String("The editor accepted the request, but the requested state was not observable yet. "
+					 "Observe 'observable.field' rather than treating this as a success.");
+	payload["operation"] = p_operation;
+	payload["claim"] = MCPContracts::operation_claim(p_operation);
+	payload["changed"] = p_changed;
+	payload["pending"] = !p_satisfied;
+	payload["observable"] = observable;
+	return payload;
+}
+
+String unsaved_text(bool p_unsaved, const String &p_path) {
+	return (p_unsaved ? String("includes ") : String("excludes ")) + p_path;
+}
+
+} // namespace
+
+Dictionary EditorAutomationService::run_operation(const Dictionary &p_arguments, String &r_error, String &r_message) {
+	r_error = String();
+	r_message = String();
+
+	// The gate is entry-time state frozen at startup, so it is read before anything else can read or
+	// mutate the editor. A disabled session names no operation, so it declares no claim either.
+	if (!automation_enabled) {
+		return EditorStateReader::operation_failure(OperationStatus::AUTOMATION_DISABLED,
+				"Editor automation is disabled in this session; no operation was performed.");
+	}
+
+	EditorOperationRequest request;
+	String parse_message;
+	if (!EditorStateReader::parse_operation(p_arguments, request, parse_message)) {
+		return EditorStateReader::operation_failure(OperationStatus::INVALID_ARGUMENTS, parse_message);
+	}
+
+	event_log.record(EditorEventLog::TYPE_ACTION_BEGIN, request.operation, String());
+	const Dictionary payload = _run_operation(request);
+	event_log.record(EditorEventLog::TYPE_ACTION_END, request.operation, payload.get("status", String()));
+	return payload;
+}
+
+Dictionary EditorAutomationService::_run_operation(const EditorOperationRequest &p_request) {
+	if (editor_interface == nullptr) {
+		return EditorStateReader::operation_failure(OperationStatus::UNSUPPORTED_CAPABILITY,
+				"The editor interface is unavailable in this session.", p_request.operation);
+	}
+
+	// Every observable this request is decided against is read here, before any branch that can
+	// mutate, so nothing below validates the request against state the request itself created.
+	const String entry_scene = EditorStateReader::current_scene_path(editor_interface);
+	const PackedStringArray entry_open = EditorStateReader::open_scene_paths(editor_interface);
+	const PackedStringArray entry_unsaved = EditorStateReader::unsaved_scene_paths(editor_interface);
+	const bool entry_playing = editor_interface->is_playing_scene();
+	const String entry_playing_scene = editor_interface->get_playing_scene();
+	const String entry_filesystem_path = EditorStateReader::current_filesystem_path(editor_interface);
+	const String entry_script = EditorStateReader::current_script_path(editor_interface);
+	const String entry_screen = EditorStateReader::current_main_screen(editor_interface);
+	const PackedStringArray screens = EditorStateReader::main_screen_names(editor_interface);
+
+	// One validator, run by every operation that takes a path, before any EditorInterface call. A
+	// rejection here has touched nothing.
+	if (p_request.has_path) {
+		String path_message;
+		const PathStatus path_status = EditorStateReader::check_resource_path(
+				p_request.path, EditorStateReader::operation_path_type(p_request.operation), path_message);
+		if (path_status == PathStatus::INVALID_PATH) {
+			return EditorStateReader::operation_failure(
+					OperationStatus::INVALID_RESOURCE_PATH, path_message, p_request.operation);
+		}
+		if (path_status == PathStatus::WRONG_TYPE) {
+			return EditorStateReader::operation_failure(
+					OperationStatus::INVALID_RESOURCE_TYPE, path_message, p_request.operation);
+		}
+	}
+
+	const String operation = p_request.operation;
+
+	if (operation == "save_scene") {
+		if (entry_scene.is_empty()) {
+			return EditorStateReader::operation_failure(OperationStatus::OPERATION_FAILED,
+					"No scene with a res:// path is being edited, so there is nothing to save.", operation);
+		}
+		const bool was_unsaved = contains_path(entry_unsaved, entry_scene);
+		const Error result = editor_interface->save_scene();
+		if (result != OK) {
+			return EditorStateReader::operation_failure(OperationStatus::OPERATION_FAILED,
+					"The editor refused to save the edited scene (error " + String::num_int64((int64_t)result) + ").",
+					operation);
+		}
+		const bool still_unsaved = contains_path(EditorStateReader::unsaved_scene_paths(editor_interface), entry_scene);
+		return operation_outcome(operation, unsaved_text(false, entry_scene), unsaved_text(still_unsaved, entry_scene),
+				!still_unsaved, was_unsaved && !still_unsaved, nullptr);
+	}
+
+	if (operation == "save_all_scenes") {
+		editor_interface->save_all_scenes();
+		const PackedStringArray after = EditorStateReader::unsaved_scene_paths(editor_interface);
+		int remaining = 0;
+		for (int i = 0; i < entry_unsaved.size(); i++) {
+			if (contains_path(after, entry_unsaved[i])) {
+				remaining++;
+			}
+		}
+		return operation_outcome(operation, "excludes every scene that was unsaved at entry",
+				"still unsaved: " + String::num_int64(remaining), remaining == 0, entry_unsaved.size() > remaining,
+				nullptr);
+	}
+
+	if (operation == "open_scene") {
+		editor_interface->open_scene_from_path(p_request.path, false);
+		const String current = EditorStateReader::current_scene_path(editor_interface);
+		return operation_outcome(
+				operation, p_request.path, current, current == p_request.path, current != entry_scene, nullptr);
+	}
+
+	if (operation == "reload_scene") {
+		if (!contains_path(entry_open, p_request.path)) {
+			return EditorStateReader::operation_failure(OperationStatus::CONFLICTING_STATE,
+					"'" + bounded_text(p_request.path) + "' is not open, so there is nothing to reload.", operation);
+		}
+		const bool was_unsaved = contains_path(entry_unsaved, p_request.path);
+		editor_interface->reload_scene_from_path(p_request.path);
+		const bool still_unsaved =
+				contains_path(EditorStateReader::unsaved_scene_paths(editor_interface), p_request.path);
+		return operation_outcome(operation, unsaved_text(false, p_request.path),
+				unsaved_text(still_unsaved, p_request.path), !still_unsaved, was_unsaved && !still_unsaved, nullptr);
+	}
+
+	if (operation == "play_current_scene" || operation == "play_main_scene" || operation == "play_scene") {
+		// Playing is not idempotent, so entry-time play state decides whether it may run at all. A
+		// second play is refused rather than performed twice.
+		if (entry_playing) {
+			if (operation == "play_scene" && entry_playing_scene == p_request.path) {
+				const Dictionary condition = play_state_condition(true);
+				return operation_outcome(operation, p_request.path, entry_playing_scene, true, false, &condition);
+			}
+			return EditorStateReader::operation_failure(OperationStatus::CONFLICTING_STATE,
+					"The editor is already playing '" + bounded_text(entry_playing_scene) +
+							"'; stop it before starting another scene.",
+					operation);
+		}
+		if (operation == "play_scene") {
+			editor_interface->play_custom_scene(p_request.path);
+		} else if (operation == "play_main_scene") {
+			editor_interface->play_main_scene();
+		} else {
+			if (entry_scene.is_empty()) {
+				return EditorStateReader::operation_failure(OperationStatus::OPERATION_FAILED,
+						"No scene with a res:// path is being edited, so there is nothing to play.", operation);
+			}
+			editor_interface->play_current_scene();
+		}
+		const Dictionary condition = play_state_condition(true);
+		if (operation == "play_scene") {
+			const String playing = editor_interface->get_playing_scene();
+			return operation_outcome(operation, p_request.path, playing, playing == p_request.path,
+					playing != entry_playing_scene, &condition);
+		}
+		const bool playing = editor_interface->is_playing_scene();
+		return operation_outcome(
+				operation, bool_text(true), bool_text(playing), playing, playing != entry_playing, &condition);
+	}
+
+	if (operation == "stop_play") {
+		const Dictionary condition = play_state_condition(false);
+		// Stopping what is not playing is a no-op that is already in the requested state, so the
+		// editor is never asked to stop twice.
+		if (!entry_playing) {
+			return operation_outcome(operation, bool_text(false), bool_text(false), true, false, &condition);
+		}
+		editor_interface->stop_playing_scene();
+		const bool playing = editor_interface->is_playing_scene();
+		return operation_outcome(operation, bool_text(false), bool_text(playing), !playing, !playing, &condition);
+	}
+
+	if (operation == "select_file") {
+		editor_interface->select_file(p_request.path);
+		const String current = EditorStateReader::current_filesystem_path(editor_interface);
+		return operation_outcome(operation, p_request.path, current, current == p_request.path,
+				current != entry_filesystem_path, nullptr);
+	}
+
+	if (operation == "switch_main_screen") {
+		if (screens.is_empty()) {
+			return EditorStateReader::operation_failure(OperationStatus::UNSUPPORTED_CAPABILITY,
+					"This editor build shows no main screens, so none can be switched to.", operation);
+		}
+		if (!screens.has(p_request.screen)) {
+			return EditorStateReader::operation_failure(OperationStatus::INVALID_ARGUMENTS,
+					"'" + bounded_text(p_request.screen) +
+							"' is not one of the main screens this editor shows; read "
+							"'main_screen.available' from read_editor_state.",
+					operation);
+		}
+		editor_interface->set_main_screen_editor(p_request.screen);
+		const String current = EditorStateReader::current_main_screen(editor_interface);
+		return operation_outcome(
+				operation, p_request.screen, current, current == p_request.screen, current != entry_screen, nullptr);
+	}
+
+	if (operation == "edit_script") {
+		ScriptEditor *script_editor = editor_interface->get_script_editor();
+		if (script_editor == nullptr) {
+			return EditorStateReader::operation_failure(OperationStatus::UNSUPPORTED_CAPABILITY,
+					"This session has no script editor, so no script can be opened.", operation);
+		}
+		ResourceLoader *loader = ResourceLoader::get_singleton();
+		Ref<Script> script = loader == nullptr ? Ref<Script>() : Ref<Script>(loader->load(p_request.path, "Script"));
+		if (script.is_null()) {
+			return EditorStateReader::operation_failure(OperationStatus::OPERATION_FAILED,
+					"'" + bounded_text(p_request.path) + "' could not be loaded as a script.", operation);
+		}
+		editor_interface->edit_script(script, p_request.has_line ? p_request.line : -1,
+				p_request.has_column ? p_request.column : 0, p_request.grab_focus);
+		const String current = EditorStateReader::current_script_path(editor_interface);
+		return operation_outcome(
+				operation, p_request.path, current, current == p_request.path, current != entry_script, nullptr);
+	}
+
+	// Every advertised operation is handled above. An operation that reached here is advertised
+	// without an implementation, which must fail closed rather than answer with another one's result.
+	return EditorStateReader::operation_failure(OperationStatus::UNSUPPORTED_CAPABILITY,
+			"Operation '" + operation + "' has no implementation in this build.", operation);
 }
 
 namespace {

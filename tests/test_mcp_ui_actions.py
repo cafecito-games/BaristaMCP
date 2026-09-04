@@ -120,6 +120,7 @@ class BaristaMCPAutomationGateTests(unittest.TestCase):
         tools = self.client.rpc("tools/list", {})["result"]["tools"]
         self.assertEqual([tool["name"] for tool in tools], list(READ_ONLY_TOOLS))
         self.assertNotIn(ACT_TOOL, [tool["name"] for tool in tools])
+        self.assertNotIn("run_editor_action", [tool["name"] for tool in tools])
         self.assertIn("read-only", str(self.initialize_result["instructions"]))
 
     def test_disabled_session_reports_the_frozen_mode(self) -> None:

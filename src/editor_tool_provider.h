@@ -29,6 +29,11 @@ class EditorToolProvider {
 	static Dictionary _tool_error(const String &p_error, const String &p_message);
 	// Wraps one act_on_editor_ui refusal, validated against the tool's advertised output schema.
 	static Dictionary _act_result(const Dictionary &p_payload);
+	// Wraps one run_editor_action refusal, validated against that tool's advertised output schema.
+	static Dictionary _operation_result(const Dictionary &p_payload);
+	// Validates one mutating tool's refusal against its own advertised output schema, so a session
+	// that never advertises the tool still cannot answer outside its published shape.
+	static Dictionary _mutating_result(const String &p_tool, const Dictionary &p_payload);
 
 public:
 	// True for a tool that can mutate the editor. The transport uses it to spend the one mutation an

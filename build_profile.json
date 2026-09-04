@@ -12,6 +12,7 @@
     "EditorPlugin",
     "EditorSelection",
     "Engine",
+    "FileAccess",
     "InputEvent",
     "InputEventKey",
     "InputEventMouse",
@@ -32,6 +33,7 @@
     "ProjectSettings",
     "Range",
     "Resource",
+    "ResourceLoader",
     "RichTextLabel",
     "Script",
     "ScriptEditor",
@@ -45,6 +47,7 @@
     "TextEdit",
     "Time",
     "Tree",
+    "VBoxContainer",
     "Viewport",
     "Window"
   ]

@@ -13,6 +13,7 @@
 #include "editor_event_log.h"
 #include "editor_selector.h"
 #include "editor_snapshot.h"
+#include "editor_state_reader.h"
 #include "editor_wait_manager.h"
 #include "mcp_schema.h"
 
@@ -42,6 +43,30 @@ const ActionClaimRule ACTION_CLAIM_RULES[] = {
 		{"select_item", MCPContracts::CLAIM_EFFECT},
 		{"select_tab", MCPContracts::CLAIM_EFFECT},
 		{"scroll", MCPContracts::CLAIM_EFFECT},
+};
+
+// What each editor operation's "ok" asserts. Every operation verifies a public postcondition before
+// it reports success, so every route here is an effect route; an operation whose completion could not
+// be observed would have to be omitted from the vocabulary rather than shipped as a delivery claim.
+// Keyed by the operation names EditorStateReader owns, so the table can gain an entry but never a
+// second definition of the vocabulary itself.
+struct OperationClaimRule {
+	const char *operation;
+	const char *claim;
+};
+
+const OperationClaimRule OPERATION_CLAIM_RULES[] = {
+		{"save_scene", MCPContracts::CLAIM_EFFECT},
+		{"save_all_scenes", MCPContracts::CLAIM_EFFECT},
+		{"open_scene", MCPContracts::CLAIM_EFFECT},
+		{"reload_scene", MCPContracts::CLAIM_EFFECT},
+		{"play_current_scene", MCPContracts::CLAIM_EFFECT},
+		{"play_main_scene", MCPContracts::CLAIM_EFFECT},
+		{"play_scene", MCPContracts::CLAIM_EFFECT},
+		{"stop_play", MCPContracts::CLAIM_EFFECT},
+		{"select_file", MCPContracts::CLAIM_EFFECT},
+		{"switch_main_screen", MCPContracts::CLAIM_EFFECT},
+		{"edit_script", MCPContracts::CLAIM_EFFECT},
 };
 
 Dictionary status_output_schema() {
@@ -248,10 +273,20 @@ Dictionary editor_state_output_schema() {
 	MCPSchema::add_property(filesystem, "scanning", MCPSchema::boolean("Whether the filesystem is scanning."), true);
 	MCPSchema::add_property(filesystem, "importing", MCPSchema::boolean("Whether the filesystem is importing."), true);
 	MCPSchema::add_property(filesystem, "scan_progress", MCPSchema::number("Scan progress between 0.0 and 1.0."), true);
+	MCPSchema::add_property(filesystem, "current_path",
+			MCPSchema::string("Path currently selected in the filesystem dock, or empty."), true);
 
 	Dictionary play = MCPSchema::object("Editor play state.");
 	MCPSchema::add_property(play, "is_playing", MCPSchema::boolean("Whether the editor is playing a scene."), true);
 	MCPSchema::add_property(play, "playing_scene", MCPSchema::string("Scene file path being played, or empty."), true);
+
+	Dictionary main_screen = MCPSchema::object("Editor main-screen state.");
+	MCPSchema::add_property(
+			main_screen, "current", MCPSchema::string("Name of the visible main screen, or empty."), true);
+	MCPSchema::add_property(main_screen, "available",
+			string_list_schema("Main screens this editor build shows. A name outside this list cannot be "
+							   "switched to and is rejected rather than requested."),
+			true);
 
 	Dictionary schema = MCPSchema::object("Stable public editor and scene state.");
 	MCPSchema::add_property(schema, "project", project_output_schema(), true);
@@ -260,6 +295,7 @@ Dictionary editor_state_output_schema() {
 	MCPSchema::add_property(schema, "script", script, true);
 	MCPSchema::add_property(schema, "filesystem", filesystem, true);
 	MCPSchema::add_property(schema, "play", play, true);
+	MCPSchema::add_property(schema, "main_screen", main_screen, true);
 	return schema;
 }
 
@@ -540,6 +576,96 @@ Dictionary events_output_schema() {
 	return schema;
 }
 
+Dictionary operation_input_schema() {
+	Dictionary schema =
+			MCPSchema::object("One explicit editor operation, performed through the documented EditorInterface method "
+							  "that corresponds to it. Every operation-specific field belongs to a specific set of "
+							  "operations, and a field the requested operation does not use is rejected rather than "
+							  "ignored. Every path is a client-supplied res:// path and is validated before any editor "
+							  "call: a path that is not normalized, contains traversal, names nothing, or names a "
+							  "resource of the wrong type never reaches the editor.");
+	MCPSchema::add_property(schema, "operation",
+			MCPSchema::enum_string(EditorStateReader::operation_vocabulary(),
+					"Operation to perform. Each operation declares a claim and the read_editor_state field "
+					"its postcondition is verified against in the tool's '_meta' operation_claims entries, "
+					"and repeats the claim in the result."),
+			true);
+	MCPSchema::add_property(schema, "path",
+			MCPSchema::string("Normalized res:// path for the operations that take one. Traversal segments, "
+							  "empty segments, other schemes, absolute paths, percent encoding, and "
+							  "backslashes are refused rather than normalized away."),
+			false);
+	MCPSchema::add_property(schema, "screen",
+			MCPSchema::string("Main screen name for switch_main_screen. It must be one of the names "
+							  "read_editor_state publishes in 'main_screen.available'; any other name is "
+							  "rejected rather than requested."),
+			false);
+	MCPSchema::add_property(schema, "line",
+			MCPSchema::ranged_integer(EditorOperationLimits::MIN_LINE, EditorOperationLimits::MAX_LINE,
+					"One-based caret line for edit_script. The public API cannot report a caret back, so the "
+					"caret is explicitly not part of this operation's verified claim."),
+			false);
+	MCPSchema::add_property(schema, "column",
+			MCPSchema::ranged_integer(EditorOperationLimits::MIN_COLUMN, EditorOperationLimits::MAX_COLUMN,
+					"Zero-based caret column for edit_script."),
+			false);
+	MCPSchema::add_property(schema, "grab_focus",
+			MCPSchema::boolean("Whether edit_script should move editor focus to the script editor."), false);
+	return schema;
+}
+
+Dictionary operation_output_schema() {
+	Dictionary observable =
+			MCPSchema::object("The public predicate this operation's claim was decided against. The field names a "
+							  "read_editor_state field, so the client can observe exactly what Barista verified.");
+	MCPSchema::add_property(
+			observable, "field", MCPSchema::string("read_editor_state field, empty when nothing was evaluated."), true);
+	MCPSchema::add_property(observable, "expected", MCPSchema::string("The value the operation requested."), true);
+	MCPSchema::add_property(observable, "observed",
+			MCPSchema::string("The value read after the operation, empty when none was."), true);
+	MCPSchema::add_property(observable, "satisfied",
+			MCPSchema::boolean("Whether the predicate held when it was read. 'ok' is reported only when it did."),
+			true);
+	MCPSchema::add_property(observable, "wait_condition",
+			MCPSchema::open_object("A wait_for_editor condition that observes this predicate, published only "
+								   "where one can express it. Absent when the client must poll "
+								   "read_editor_state instead."),
+			false);
+
+	Dictionary schema = MCPSchema::object("Result of one explicit editor operation.");
+	MCPSchema::add_property(schema, "ok", MCPSchema::boolean("True only when the status is 'ok'."), true);
+	MCPSchema::add_property(schema, "status",
+			MCPSchema::enum_string(
+					EditorStateReader::operation_status_vocabulary(), "Operation status for this request."),
+			true);
+	MCPSchema::add_property(
+			schema, "message", MCPSchema::string("Bounded diagnostic, empty when the operation succeeded."), true);
+	MCPSchema::add_property(schema, "operation",
+			MCPSchema::enum_string(EditorStateReader::operation_vocabulary(),
+					"The requested operation. Absent whenever the request was refused before it was parsed, "
+					"which covers both a request that named no advertised operation and one refused by the "
+					"session gate or the per-request mutation budget before any operation was read."),
+			false);
+	MCPSchema::add_property(schema, "claim",
+			MCPSchema::enum_string(MCPContracts::claim_vocabulary(),
+					"What 'ok' asserts for the requested operation. Every operation is an 'effect' route: "
+					"'ok' means the published postcondition was read back and held. Absent exactly where "
+					"'operation' is absent, because a claim is read from the named operation and is never "
+					"guessed for a request that was never parsed."),
+			false);
+	MCPSchema::add_property(schema, "changed",
+			MCPSchema::boolean("Whether the published observable differs between the reading taken before the "
+							   "operation and the reading taken after it."),
+			true);
+	MCPSchema::add_property(schema, "pending",
+			MCPSchema::boolean("True only for status 'pending': the editor accepted the request but the "
+							   "requested state was not observable yet, so the client must observe the "
+							   "published predicate. It is never reported as success."),
+			true);
+	MCPSchema::add_property(schema, "observable", observable, true);
+	return schema;
+}
+
 Dictionary make_tool(const String &p_name, const String &p_description, const Dictionary &p_output_schema,
 		const Dictionary &p_input_schema = MCPSchema::object()) {
 	Dictionary tool;
@@ -593,6 +719,32 @@ Array MCPContracts::build_action_claims() {
 	return entries;
 }
 
+String MCPContracts::operation_claim(const String &p_operation) {
+	for (const OperationClaimRule &rule : OPERATION_CLAIM_RULES) {
+		if (p_operation == rule.operation) {
+			return rule.claim;
+		}
+	}
+	return String();
+}
+
+Array MCPContracts::build_operation_claims() {
+	// Driven by the operation vocabulary EditorStateReader owns, never by the rule table, so an
+	// operation added there without a declared claim publishes an entry with an empty claim rather
+	// than disappearing unnoticed.
+	Array entries;
+	const PackedStringArray operations = EditorStateReader::operation_vocabulary();
+	for (int i = 0; i < operations.size(); i++) {
+		Dictionary entry;
+		entry["operation"] = operations[i];
+		entry["claim"] = operation_claim(operations[i]);
+		entry["observable"] = EditorStateReader::operation_observable_field(operations[i]);
+		entry["postcondition"] = EditorStateReader::operation_postcondition(operations[i]);
+		entries.push_back(entry);
+	}
+	return entries;
+}
+
 Array MCPContracts::build_tools_list(bool p_mutation_enabled) {
 	Array tools;
 	tools.push_back(make_tool("barista_status",
@@ -633,6 +785,21 @@ Array MCPContracts::build_tools_list(bool p_mutation_enabled) {
 		meta["action_claims"] = build_action_claims();
 		act["_meta"] = meta;
 		tools.push_back(act);
+
+		Dictionary operation = make_tool(OPERATION_TOOL_NAME,
+				"Perform one explicit editor operation through the documented public EditorInterface method "
+				"that corresponds to it: save, open, reload, play, stop, select, switch main screen, or edit "
+				"a script. Every operation is an 'effect' route, so 'ok' means the published postcondition "
+				"was read back from public state and held; where Godot completes the operation "
+				"asynchronously the result is 'pending' with the predicate to observe, never an early "
+				"success. Client-supplied paths must be normalized res:// paths and are validated before "
+				"any editor call. "
+				"Mutating: enabled only when this session opted in before startup.",
+				operation_output_schema(), operation_input_schema());
+		Dictionary operation_meta;
+		operation_meta["operation_claims"] = build_operation_claims();
+		operation["_meta"] = operation_meta;
+		tools.push_back(operation);
 	}
 	return tools;
 }
