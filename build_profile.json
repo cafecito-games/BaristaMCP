@@ -35,6 +35,7 @@
     "Range",
     "Resource",
     "ResourceLoader",
+    "ResourceUID",
     "RichTextLabel",
     "Script",
     "ScriptEditor",

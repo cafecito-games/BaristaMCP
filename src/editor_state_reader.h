@@ -104,6 +104,9 @@ public:
 	// a path the client never supplied, and the editor asks for one with a modal dialog, so it is a
 	// state a save operation refuses in rather than acts in.
 	static bool has_unsaved_untitled_scene(EditorInterface *p_editor_interface);
+	// True when the script editor holds unsaved files. The editor writes those to disk on its own
+	// before it runs a scene, so it is state a play operation refuses in rather than acts in.
+	static bool has_unsaved_scripts(EditorInterface *p_editor_interface);
 	static String current_filesystem_path(EditorInterface *p_editor_interface);
 	static String current_script_path(EditorInterface *p_editor_interface);
 

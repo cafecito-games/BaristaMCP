@@ -677,6 +677,11 @@ bool EditorStateReader::has_unsaved_untitled_scene(EditorInterface *p_editor_int
 	return p_editor_interface->get_unsaved_scenes().size() > unsaved_scene_paths(p_editor_interface).size();
 }
 
+bool EditorStateReader::has_unsaved_scripts(EditorInterface *p_editor_interface) {
+	ScriptEditor *script_editor = p_editor_interface == nullptr ? nullptr : p_editor_interface->get_script_editor();
+	return script_editor != nullptr && !script_editor->get_unsaved_files().is_empty();
+}
+
 String EditorStateReader::current_filesystem_path(EditorInterface *p_editor_interface) {
 	return p_editor_interface == nullptr ? String() : p_editor_interface->get_current_path();
 }

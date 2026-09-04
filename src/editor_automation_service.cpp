@@ -20,6 +20,7 @@
 #include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
+#include <godot_cpp/classes/resource_uid.hpp>
 #include <godot_cpp/classes/script.hpp>
 #include <godot_cpp/classes/script_editor.hpp>
 #include <godot_cpp/classes/time.hpp>
@@ -966,10 +967,12 @@ Dictionary EditorAutomationService::_run_operation(const EditorOperationRequest 
 		// The editor may save dirty scenes before it runs, which writes editor changes this route's
 		// postcondition says nothing about, so a play is refused while anything is unsaved rather than
 		// performed with an effect it cannot report.
-		if (!entry_unsaved.is_empty() || EditorStateReader::has_unsaved_untitled_scene(editor_interface)) {
+		// Scenes and scripts alike: the editor's own autosave writes both before it runs.
+		if (!entry_unsaved.is_empty() || EditorStateReader::has_unsaved_untitled_scene(editor_interface) ||
+				EditorStateReader::has_unsaved_scripts(editor_interface)) {
 			return EditorStateReader::operation_failure(OperationStatus::CONFLICTING_STATE,
-					"An open scene has unsaved changes and the editor may write it to disk before running, "
-					"which is an effect this operation cannot report; save it first.",
+					"An open scene or script has unsaved changes and the editor may write it to disk before "
+					"running, which is an effect this operation cannot report; save it first.",
 					operation);
 		}
 		if (operation == "play_main_scene") {
@@ -978,9 +981,16 @@ Dictionary EditorAutomationService::_run_operation(const EditorOperationRequest 
 			// true. The configured setting is validated by the same path validator every other
 			// operation uses, before the editor is called.
 			ProjectSettings *project_settings = ProjectSettings::get_singleton();
-			const String main_scene = project_settings == nullptr
+			String main_scene = project_settings == nullptr
 					? String()
 					: String(project_settings->get_setting("application/run/main_scene", ""));
+			// The editor writes this setting as a uid when the main scene is chosen through the UI, so
+			// the configured value is resolved to its res:// path before it is validated; a uid nothing
+			// resolves stays as it is and is refused by the validator.
+			if (main_scene.begins_with("uid://")) {
+				ResourceUID *resource_uid = ResourceUID::get_singleton();
+				main_scene = resource_uid == nullptr ? String() : resource_uid->uid_to_path(main_scene);
+			}
 			String main_scene_message;
 			if (main_scene.is_empty() ||
 					EditorStateReader::check_resource_path(main_scene, "PackedScene", main_scene_message) !=
