@@ -47,6 +47,22 @@ class BaristaMCPEditorStateTests(unittest.TestCase):
         self.assertIn("result", read, read)
         return json.loads(read["result"]["contents"][0]["text"])
 
+    @staticmethod
+    def _settled(state: dict[str, Any]) -> dict[str, Any]:
+        """The state minus the live scan reading, which advances on its own between two reads.
+
+        Whether the resource filesystem is scanning is real editor state that changes without anyone
+        asking it to, so comparing two reads of it would assert that the editor stood still rather
+        than that a read changed nothing. The scanning fields are compared by shape instead, so the
+        section can never quietly lose or gain one.
+        """
+        settled = dict(state)
+        filesystem = dict(settled["filesystem"])
+        for field in ("scanning", "importing", "scan_progress"):
+            filesystem[field] = type(filesystem[field]).__name__
+        settled["filesystem"] = filesystem
+        return settled
+
     def _assert_string_list(self, value: dict[str, Any]) -> None:
         self.assertEqual(sorted(value), sorted(STRING_LIST_FIELDS))
         self.assertIsInstance(value["count"], int)
@@ -95,8 +111,8 @@ class BaristaMCPEditorStateTests(unittest.TestCase):
     def test_tool_and_resource_state_cannot_drift(self) -> None:
         """Single source of truth: the resource and the tool call the same reader."""
         self.assertEqual(
-            self._resource("barista://editor/state"),
-            self.client.structured_tool("read_editor_state", {}),
+            self._settled(self._resource("barista://editor/state")),
+            self._settled(self.client.structured_tool("read_editor_state", {})),
         )
         # The project section is the very same payload the project tool and resource publish.
         state = self.client.structured_tool("read_editor_state", {})
@@ -137,7 +153,10 @@ class BaristaMCPEditorStateTests(unittest.TestCase):
 
     def test_state_reads_are_side_effect_free(self) -> None:
         first = self.client.structured_tool("read_editor_state", {})
-        self.assertEqual(first, self.client.structured_tool("read_editor_state", {}))
+        self.assertEqual(
+            self._settled(first),
+            self._settled(self.client.structured_tool("read_editor_state", {})),
+        )
         self.assertEqual(
             self._resource("barista://scene/tree"), self._resource("barista://scene/tree")
         )

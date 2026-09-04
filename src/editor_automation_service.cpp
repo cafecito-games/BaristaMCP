@@ -766,9 +766,9 @@ bool contains_path(const PackedStringArray &p_values, const String &p_path) {
 	return false;
 }
 
-// A wait_for_editor condition that observes the same predicate, for the operations whose predicate
-// one can express. Where none can, the client polls read_editor_state instead and nothing is
-// published rather than a condition that would observe something else.
+// A wait_for_editor condition that observes exactly the predicate its operation published. Only the
+// operations whose observable is play.is_playing have one: no advertised condition can name a scene,
+// so nothing is published where a condition would observe something weaker than the claim.
 Dictionary play_state_condition(bool p_playing) {
 	Dictionary condition;
 	condition["type"] = EditorWaitManager::CONDITION_PLAY_STATE;
@@ -924,8 +924,7 @@ Dictionary EditorAutomationService::_run_operation(const EditorOperationRequest 
 		// second play is refused rather than performed twice.
 		if (entry_playing) {
 			if (operation == "play_scene" && entry_playing_scene == p_request.path) {
-				const Dictionary condition = play_state_condition(true);
-				return operation_outcome(operation, p_request.path, entry_playing_scene, true, false, &condition);
+				return operation_outcome(operation, p_request.path, entry_playing_scene, true, false, nullptr);
 			}
 			return EditorStateReader::operation_failure(OperationStatus::CONFLICTING_STATE,
 					"The editor is already playing '" + bounded_text(entry_playing_scene) +
@@ -943,12 +942,15 @@ Dictionary EditorAutomationService::_run_operation(const EditorOperationRequest 
 			}
 			editor_interface->play_current_scene();
 		}
-		const Dictionary condition = play_state_condition(true);
 		if (operation == "play_scene") {
+			// No advertised wait condition can name a scene: play_state observes only whether some scene
+			// is playing, so publishing it here would let a client accept a different scene as this
+			// request's completion. The client polls the published field instead.
 			const String playing = editor_interface->get_playing_scene();
 			return operation_outcome(operation, p_request.path, playing, playing == p_request.path,
-					playing != entry_playing_scene, &condition);
+					playing != entry_playing_scene, nullptr);
 		}
+		const Dictionary condition = play_state_condition(true);
 		const bool playing = editor_interface->is_playing_scene();
 		return operation_outcome(
 				operation, bool_text(true), bool_text(playing), playing, playing != entry_playing, &condition);

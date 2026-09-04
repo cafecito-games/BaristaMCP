@@ -296,6 +296,15 @@ class BaristaMCPOperationTests(unittest.TestCase):
             self.assertIs(observable["satisfied"], True, payload)
         if payload["pending"]:
             self.assertIs(observable["satisfied"], False, payload)
+        # A published wait condition must observe exactly the predicate the result claims. Only
+        # play.is_playing has one: no advertised condition can name a scene, so an operation whose
+        # observable is a scene path publishes none rather than one that would accept another scene.
+        if "wait_condition" in observable:
+            self.assertEqual(observable["field"], "play.is_playing", payload)
+            self.assertEqual(observable["wait_condition"]["type"], "play_state")
+            self.assertEqual(
+                observable["wait_condition"]["playing"], observable["expected"] == "true", payload
+            )
         if "operation" in payload:
             self.assertEqual(payload["claim"], EXPECTED_OPERATION_CLAIMS[payload["operation"]])
             self.assertEqual(
@@ -557,7 +566,10 @@ class BaristaMCPOperationTests(unittest.TestCase):
                     self.assertIn(
                         payload["status"], ("ok", "pending", "conflicting_state"), payload
                     )
-                    if payload["pending"]:
+                    if operation == "play_scene":
+                        # play.playing_scene has no advertised wait condition, so none is published.
+                        self.assertNotIn("wait_condition", payload["observable"], payload)
+                    elif payload["pending"]:
                         # A pending play publishes the wait a client can start for it.
                         self.assertEqual(
                             payload["observable"]["wait_condition"]["type"], "play_state"
