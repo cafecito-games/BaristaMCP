@@ -840,111 +840,6 @@ Dictionary EditorAutomationService::poll_events(const Dictionary &p_arguments, S
 	return event_log.poll(has_marker, marker, limit);
 }
 
-namespace {
-
-// The deepest focused element of a subtree. Children are examined before the element itself, because
-// Godot reports both an active Window and the control inside it that owns the keyboard as focused,
-// and it is the control a client can name and act on.
-const EditorElement *find_deepest_focused(const std::vector<EditorElement> &p_elements) {
-	for (const EditorElement &element : p_elements) {
-		const EditorElement *found = find_deepest_focused(element.children);
-		if (found != nullptr) {
-			return found;
-		}
-		if (element.focused) {
-			return &element;
-		}
-	}
-	return nullptr;
-}
-
-// True when any part of this subtree was cut short by a capture limit, so an element the capture
-// never reached could still be inside it.
-bool subtree_truncated(const EditorElement &p_element) {
-	if (p_element.truncated) {
-		return true;
-	}
-	for (const EditorElement &child : p_element.children) {
-		if (subtree_truncated(child)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-// The deepest focused element outside every Window subtree. Each viewport keeps its own focus owner,
-// so when no Window reports focus a control inside one owns no keyboard, and its subtree is skipped
-// exactly as the focused-window search skips unfocused windows.
-const EditorElement *find_focused_outside_windows(const std::vector<EditorElement> &p_elements) {
-	for (const EditorElement &element : p_elements) {
-		if (element.is_window) {
-			continue;
-		}
-		const EditorElement *found = find_focused_outside_windows(element.children);
-		if (found != nullptr) {
-			return found;
-		}
-		if (element.focused) {
-			return &element;
-		}
-	}
-	return nullptr;
-}
-
-// What one capture could establish about the element that owns the keyboard.
-struct FocusOwner {
-	// The element that owns the keyboard, or nullptr when the capture showed that nothing does.
-	const EditorElement *element = nullptr;
-	// False when a capture limit cut the walk short of the focus owner, so the answer is unknown
-	// rather than "nothing holds focus".
-	bool resolved = true;
-	// True once the walk has decided; only meaningful while recursing.
-	bool decided = false;
-};
-
-// The focus owner of the focused Window, when the capture reached one. Every viewport retains its own
-// focus owner, so a control in a background window keeps reporting focus while a dialog is up; only
-// the focused window's owner actually holds the keyboard.
-FocusOwner find_focused_window_owner(const std::vector<EditorElement> &p_elements) {
-	for (const EditorElement &element : p_elements) {
-		if (element.is_window && element.focused) {
-			FocusOwner owner;
-			owner.decided = true;
-			owner.element = find_deepest_focused(element.children);
-			if (owner.element == nullptr) {
-				// A Window's own handle is never substituted for a focus owner the capture could not
-				// reach: an omitted subtree can hold the control that actually holds the keyboard, so
-				// the answer is unknown rather than the ancestor that was reached.
-				if (subtree_truncated(element)) {
-					owner.resolved = false;
-				} else {
-					owner.element = &element;
-				}
-			}
-			return owner;
-		}
-		const FocusOwner found = find_focused_window_owner(element.children);
-		if (found.decided) {
-			return found;
-		}
-	}
-	return FocusOwner();
-}
-
-// The element a focus wait tracks. Focus identity is published as a durable handle, so a focus change
-// is compared between captures rather than against a capture-scoped element id.
-FocusOwner find_focused(const std::vector<EditorElement> &p_elements) {
-	FocusOwner owner = find_focused_window_owner(p_elements);
-	if (owner.decided) {
-		return owner;
-	}
-	owner.decided = true;
-	owner.element = find_focused_outside_windows(p_elements);
-	return owner;
-}
-
-} // namespace
-
 void EditorAutomationService::_build_wait_context(
 		bool p_capture, uint64_t p_now_ms, EditorWaitContext &r_context, EditorSnapshotData &r_snapshot) {
 	r_context.now_ms = p_now_ms;
@@ -964,8 +859,8 @@ void EditorAutomationService::_build_wait_context(
 	}
 	// Wait evaluation must see every element a client can name. A selector reaches internal children
 	// and the full published depth through inspect_editor_ui and find_editor_ui, so a wait judged
-	// against a narrower capture would decide presence, absence, uniqueness, or focus over a domain
-	// that never contained the element the client asked about. The widest published options are used
+	// against a narrower capture would decide presence, absence, or uniqueness over a domain that
+	// never contained the element the client asked about. The widest published options are used
 	// here for the same reason read_element uses them, and truncation still guards every verdict that
 	// needs an exhaustive walk. It deliberately does not go through _capture: the public generation,
 	// the issued-handle registry, and the cached capture a cursor resumes against are request-owned
@@ -982,18 +877,6 @@ void EditorAutomationService::_build_wait_context(
 	r_snapshot.applied_options = options;
 	r_context.has_snapshot = true;
 	r_context.snapshot = &r_snapshot;
-	const FocusOwner focus = find_focused(r_snapshot.roots);
-	r_context.focus_resolved = focus.resolved;
-	if (!focus.resolved || focus.element == nullptr) {
-		return;
-	}
-	r_context.focused_handle = focus.element->handle;
-	// The handle above is this server's own comparison identity. Publishing it is a separate claim:
-	// every other tool refuses a handle Barista never issued, so a wait names the focus owner only
-	// when the issued-handle registry already knows it.
-	uint64_t focused_instance_id = 0;
-	r_context.focused_handle_issued = parse_handle(focus.element->handle, focused_instance_id) &&
-			issued_handles.find(focused_instance_id) != issued_handles.end();
 }
 
 void EditorAutomationService::process(double p_delta) {

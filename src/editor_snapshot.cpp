@@ -402,7 +402,6 @@ public:
 		}
 
 		EditorElement element;
-		element.is_window = window != nullptr;
 		const uint64_t instance_id = (uint64_t)p_node->get_instance_id();
 		element.handle = "el:" + String::num_uint64(instance_id);
 		element.id = "s" + String::num_uint64(data.generation) + ":" + String::num_uint64(instance_id);

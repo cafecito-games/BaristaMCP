@@ -368,8 +368,7 @@ Dictionary wait_condition_schema() {
 					"What this wait observes. 'frames_elapsed' counts editor process frames; "
 					"'selector_appears' and 'selector_disappears' watch a semantic selector, and absence is "
 					"only ever reported from a capture and a walk that were not cut short; 'selector_state' "
-					"waits until the single element 'selector' names also satisfies 'state'; 'focus_changed' "
-					"waits until focus leaves the element that held it when the wait was created; "
+					"waits until the single element 'selector' names also satisfies 'state'; "
 					"'play_state' waits for the requested play state; 'filesystem_settles' waits until the "
 					"editor resource filesystem is neither scanning nor importing."),
 			true);

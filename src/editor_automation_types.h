@@ -68,9 +68,6 @@ struct EditorElement {
 	bool enabled = true;
 	bool focused = false;
 	bool internal = false;
-	// True for a captured Window, including every Window subclass such as a dialog. The published
-	// role narrows by class, so it cannot answer this question on its own.
-	bool is_window = false;
 	// True when children were omitted because a depth or element limit was reached.
 	bool truncated = false;
 	Rect2 bounds;

@@ -79,7 +79,6 @@ PackedStringArray EditorWaitManager::condition_vocabulary() {
 	types.push_back(CONDITION_SELECTOR_APPEARS);
 	types.push_back(CONDITION_SELECTOR_DISAPPEARS);
 	types.push_back(CONDITION_SELECTOR_STATE);
-	types.push_back(CONDITION_FOCUS_CHANGED);
 	types.push_back(CONDITION_PLAY_STATE);
 	types.push_back(CONDITION_FILESYSTEM_SETTLES);
 	return types;
@@ -146,7 +145,7 @@ Dictionary EditorWaitManager::limits() {
 
 bool EditorWaitManager::_condition_needs_snapshot(const String &p_type) {
 	return p_type == CONDITION_SELECTOR_APPEARS || p_type == CONDITION_SELECTOR_DISAPPEARS ||
-			p_type == CONDITION_SELECTOR_STATE || p_type == CONDITION_FOCUS_CHANGED;
+			p_type == CONDITION_SELECTOR_STATE;
 }
 
 bool EditorWaitManager::is_wait_id(const String &p_id) {
@@ -318,9 +317,6 @@ bool EditorWaitManager::parse_condition(
 		}
 		return true;
 	}
-	if (type == CONDITION_FOCUS_CHANGED) {
-		return reject_unused_fields(condition, allowed, type, r_message);
-	}
 	if (type == CONDITION_PLAY_STATE) {
 		allowed.push_back(FIELD_PLAYING);
 		if (!reject_unused_fields(condition, allowed, type, r_message) ||
@@ -462,23 +458,6 @@ bool EditorWaitManager::_evaluate(EditorWait &r_wait, const EditorWaitContext &p
 	const bool truncated = snapshot_truncated(data);
 	r_wait.detail["truncated"] = truncated;
 
-	if (condition.type == CONDITION_FOCUS_CHANGED) {
-		// Only a handle Barista issued is ever named: every other tool refuses one it did not, so a
-		// focus owner the registry does not know is published as an absent handle rather than as a
-		// name no client could use.
-		r_wait.detail["focused_handle"] = p_context.focused_handle_issued ? p_context.focused_handle : String();
-		r_wait.detail["focused_handle_issued"] = p_context.focused_handle_issued;
-		r_wait.detail["focus_resolved"] = p_context.focus_resolved;
-		// A capture that was cut short can neither show that focus moved nor that it did not: the
-		// element that holds the keyboard may simply be one the walk never reached, and the window
-		// that contains it is never read as a stand-in for it. Truncation is judged on every tick and
-		// not only at creation, because a capture that was complete when the baseline was taken can
-		// be cut short by a later frame.
-		if (!p_context.focus_resolved || truncated) {
-			return false;
-		}
-		return p_context.focused_handle != r_wait.baseline_focus_handle;
-	}
 	if (condition.selector == nullptr) {
 		return false;
 	}
@@ -553,7 +532,6 @@ Dictionary EditorWaitManager::start(
 	candidate.deadline_ms = p_context.now_ms + (uint64_t)p_timeout_ms;
 	candidate.priming = candidate.condition.type == CONDITION_FILESYSTEM_SETTLES && candidate.condition.require_start;
 	candidate.prime_deadline_ms = p_context.now_ms + (uint64_t)candidate.condition.prime_ms;
-	candidate.baseline_focus_handle = p_context.focused_handle;
 	const String condition_type = candidate.condition.type;
 
 	// A condition Barista cannot observe at all is refused outright rather than parked on a handle
@@ -562,17 +540,6 @@ Dictionary EditorWaitManager::start(
 		return _payload(nullptr, Status::UNSUPPORTED_CAPABILITY,
 				"The editor UI could not be captured, so this condition cannot be evaluated.", condition_type,
 				p_context.now_ms);
-	}
-	// A focus wait is judged against the focus this capture saw. A capture that was cut short may
-	// have omitted the element that holds focus, so it cannot establish a baseline and the wait is
-	// refused rather than parked on a baseline that was never true. Every later tick applies the same
-	// rule in _evaluate; this only keeps a wait from ever being created against an unprovable one.
-	if (condition_type == CONDITION_FOCUS_CHANGED && p_context.snapshot != nullptr &&
-			(!p_context.focus_resolved || snapshot_truncated(*p_context.snapshot))) {
-		return _payload(nullptr, Status::UNSUPPORTED_CAPABILITY,
-				"The editor UI capture was truncated, so the element holding focus cannot be established as a "
-				"baseline.",
-				condition_type, p_context.now_ms);
 	}
 	if (condition_type == CONDITION_FILESYSTEM_SETTLES && !p_context.filesystem_available) {
 		return _payload(nullptr, Status::UNSUPPORTED_CAPABILITY,
